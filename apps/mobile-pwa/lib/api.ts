@@ -29,11 +29,13 @@ const clone = <T,>(value: T): T => structuredClone(value);
 
 class LiveApiError extends Error {
   status?: number;
+  payload?: unknown;
 
-  constructor(message: string, status?: number) {
+  constructor(message: string, status?: number, payload?: unknown) {
     super(message);
     this.name = "LiveApiError";
     this.status = status;
+    this.payload = payload;
   }
 }
 
@@ -87,7 +89,32 @@ async function fetchLive<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   if (!response.ok) {
-    throw new LiveApiError(`API error ${response.status}`, response.status);
+    let payload: unknown = null;
+    let message = `API error ${response.status}`;
+    const contentType = response.headers.get("content-type") ?? "";
+
+    try {
+      if (contentType.includes("application/json")) {
+        payload = await response.json();
+      } else {
+        payload = await response.text();
+      }
+    } catch {
+      payload = null;
+    }
+
+    if (payload && typeof payload === "object") {
+      const objectPayload = payload as Record<string, unknown>;
+      if (typeof objectPayload.error === "string" && objectPayload.error.trim()) {
+        message = objectPayload.error.trim();
+      } else if (typeof objectPayload.message === "string" && objectPayload.message.trim()) {
+        message = objectPayload.message.trim();
+      }
+    } else if (typeof payload === "string" && payload.trim()) {
+      message = payload.trim();
+    }
+
+    throw new LiveApiError(message, response.status, payload);
   }
 
   return (await response.json()) as T;
@@ -484,9 +511,30 @@ export const api = {
           };
     }
 
-    return fetchLive<PairingCompleteResponse>("/api/pairing/complete", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
+    try {
+      return await fetchLive<PairingCompleteResponse>("/api/pairing/complete", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    } catch (error) {
+      if (error instanceof LiveApiError) {
+        const fallback =
+          error.status === 410
+            ? "Sessão de pairing expirada. Inicie novamente."
+            : error.status === 401
+              ? "Código ou palavra-passe inválidos."
+              : "Emparelhamento falhou.";
+
+        return {
+          paired: false,
+          error: error.message || fallback,
+        };
+      }
+
+      return {
+        paired: false,
+        error: "Falha a comunicar com o gateway de pairing.",
+      };
+    }
   },
 };

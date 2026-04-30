@@ -259,10 +259,13 @@ export default function LoginPage() {
                     const nextHealth = await api.health();
                     setHealth(nextHealth);
                     setNode(nextHealth.node);
-                  } catch {
+                  } catch (error) {
                     setToast({
                       open: true,
-                      message: "Falha a comunicar com o gateway de pairing.",
+                      message:
+                        error instanceof Error && error.message
+                          ? error.message
+                          : "Falha a comunicar com o gateway de pairing.",
                       tone: "danger",
                     });
                     return;
