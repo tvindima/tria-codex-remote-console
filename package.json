@@ -1,0 +1,12 @@
+{
+  "name": "tria-codex-remote",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.26.2",
+  "scripts": {
+    "dev": "pnpm --filter mobile-pwa dev",
+    "build": "pnpm --filter mobile-pwa build",
+    "lint": "pnpm --filter mobile-pwa lint",
+    "typecheck": "pnpm --recursive --if-present typecheck"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "TRIA Codex Remote Console",
+  "short_name": "TRIA Codex",
+  "description": "Remote cockpit for local Codex threads running on Mac Mini.",
+  "start_url": "/dashboard",
+  "display": "standalone",
+  "background_color": "#05070B",
+  "theme_color": "#05070B",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
