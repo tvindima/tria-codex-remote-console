@@ -338,7 +338,7 @@ export default function ThreadDetailPage() {
       ]);
       setHistoryCount((previous) => previous + 1);
 
-      if (api.mode === "live") {
+    if (api.mode === "live") {
         setMessages((previous) =>
         previous.map((item) =>
           item.id === assistantId
@@ -351,6 +351,12 @@ export default function ThreadDetailPage() {
             : item,
         ),
       );
+      setTimeout(() => {
+        void refreshHistory();
+      }, 2500);
+      setTimeout(() => {
+        void refreshHistory();
+      }, 7000);
       return;
     }
 
