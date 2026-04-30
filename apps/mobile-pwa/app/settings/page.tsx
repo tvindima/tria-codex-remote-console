@@ -1,12 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { AppShell } from "@/components/layout/app-shell";
 import { ScreenTransition } from "@/components/layout/screen-transition";
+import { Input } from "@/components/ui/input";
+import { Toast } from "@/components/ui/toast";
+import { ActionButton } from "@/components/vistaulux/action-button";
 import { StatusPill } from "@/components/vistaulux/status-pill";
 import { VistaCard } from "@/components/vistaulux/vista-card";
 import { api } from "@/lib/api";
+import { GatewayHealth } from "@/lib/types";
 
 const sections = [
   "Mac Mini Node",
@@ -19,45 +23,289 @@ const sections = [
 ];
 
 export default function SettingsPage() {
-  const [mode, setMode] = useState(api.mode);
+  const [health, setHealth] = useState<GatewayHealth | null>(null);
+  const [gatewayToken, setGatewayToken] = useState("");
+  const [pairingId, setPairingId] = useState("");
+  const [pairingHint, setPairingHint] = useState("------");
+  const [pairingCode, setPairingCode] = useState("");
+  const [pairingPassphrase, setPairingPassphrase] = useState("");
+  const [pairingBusy, setPairingBusy] = useState(false);
+  const [toast, setToast] = useState<{
+    open: boolean;
+    message: string;
+    tone: "success" | "danger" | "info";
+  }>({
+    open: false,
+    message: "",
+    tone: "info",
+  });
+
+  useEffect(() => {
+    api.health().then(setHealth);
+  }, []);
+
+  useEffect(() => {
+    if (!toast.open) {
+      return;
+    }
+
+    const timer = setTimeout(
+      () => setToast((previous) => ({ ...previous, open: false })),
+      2200,
+    );
+
+    return () => clearTimeout(timer);
+  }, [toast]);
+
+  const mode = health?.mode ?? api.mode;
+  const connection = health?.connectionState.toLowerCase() ?? (mode === "demo" ? "demo_mode" : "partial_connection");
+  const loadHealth = async () => {
+    const nextHealth = await api.health();
+    setHealth(nextHealth);
+    return nextHealth;
+  };
 
   return (
     <AppShell title="Settings" subtitle="Control plane and security preferences.">
       <ScreenTransition>
+        <Toast open={toast.open} message={toast.message} tone={toast.tone} />
+
         <VistaCard>
           <div className="flex items-center justify-between">
             <div>
               <h2 className="text-lg font-semibold text-slate-100">Runtime mode</h2>
               <p className="text-sm text-slate-400">Current mode: {mode}</p>
             </div>
-            <StatusPill status={mode === "demo" ? "running" : "online"} />
+            <StatusPill status={connection} pulse={connection === "live_mode"} />
           </div>
 
-          <div className="mt-3 grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              onClick={() => setMode("demo")}
-              className={`min-h-[44px] rounded-xl border text-sm font-semibold transition ${
-                mode === "demo"
-                  ? "border-blue-400/40 bg-blue-500/16 text-blue-100"
-                  : "border-white/12 bg-white/6 text-slate-300"
-              }`}
-            >
-              Demo mode
-            </button>
-            <button
-              type="button"
-              onClick={() => setMode("live")}
-              className={`min-h-[44px] rounded-xl border text-sm font-semibold transition ${
-                mode === "live"
-                  ? "border-emerald-400/40 bg-emerald-500/16 text-emerald-100"
-                  : "border-white/12 bg-white/6 text-slate-300"
-              }`}
-            >
-              Live mode
-            </button>
+          <div className="mt-3 grid gap-1.5 text-sm text-slate-300">
+            <p>Node — {health?.node.name ?? "Mac Mini M4 Pro"}</p>
+            <p>Tunnel — {health?.tunnel.mode ?? "tailscale"}</p>
+            <p>Adapter — {health?.codex.adapter ?? "demo"}</p>
+            <p>API Mode — {api.mode}</p>
+          </div>
+
+          <div className="mt-3 rounded-xl border border-white/12 bg-white/6 p-3 text-xs text-slate-300">
+            Alterar runtime mode exige configuração de ambiente (`NEXT_PUBLIC_API_MODE`) e restart do deploy.
           </div>
         </VistaCard>
+
+        {api.mode === "live" ? (
+          <>
+            <VistaCard className="space-y-3">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-100">Device re-pairing</h2>
+                <p className="text-sm text-slate-400">
+                  Se perder acesso após instalar no iPhone, re-emparelhe aqui sem voltar ao ecrã inicial.
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-white/12 bg-white/6 p-3 text-xs text-slate-300">
+                Pairing code atual: <span className="font-semibold text-slate-100">{pairingHint}</span>
+              </div>
+
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <ActionButton
+                  tone="primary"
+                  onClick={async () => {
+                    setPairingBusy(true);
+                    try {
+                      const start = await api.startPairing();
+                      setPairingId(start.pairingId);
+                      setPairingHint(start.challenge || "------");
+                      setPairingCode(start.challenge || "");
+                      setToast({
+                        open: true,
+                        message: "Novo pairing code gerado.",
+                        tone: "info",
+                      });
+                    } catch {
+                      setToast({
+                        open: true,
+                        message: "Falha ao iniciar re-emparelhamento.",
+                        tone: "danger",
+                      });
+                    } finally {
+                      setPairingBusy(false);
+                    }
+                  }}
+                >
+                  {pairingBusy ? "A gerar..." : "Gerar novo código"}
+                </ActionButton>
+
+                <ActionButton
+                  tone="danger"
+                  onClick={() => {
+                    setPairingId("");
+                    setPairingHint("------");
+                    setPairingCode("");
+                    setPairingPassphrase("");
+                  }}
+                >
+                  Limpar formulário
+                </ActionButton>
+              </div>
+
+              <Input
+                value={pairingCode}
+                onChange={(event) => setPairingCode(event.target.value)}
+                inputMode="numeric"
+                placeholder="Pairing code (ex: 123456)"
+                className="h-[52px] rounded-[18px] border-white/16 bg-white/8 text-slate-100 placeholder:text-slate-500"
+              />
+
+              <Input
+                value={pairingPassphrase}
+                onChange={(event) => setPairingPassphrase(event.target.value)}
+                placeholder="Palavra-passe de emparelhamento"
+                className="h-[52px] rounded-[18px] border-white/16 bg-white/8 text-slate-100 placeholder:text-slate-500"
+              />
+
+              <ActionButton
+                tone="success"
+                onClick={async () => {
+                  const code = pairingCode.trim();
+                  const pass = pairingPassphrase.trim();
+                  if (!code || !pass) {
+                    setToast({
+                      open: true,
+                      message: "Introduza código e palavra-passe.",
+                      tone: "danger",
+                    });
+                    return;
+                  }
+
+                  setPairingBusy(true);
+                  try {
+                    const start = pairingId ? null : await api.startPairing();
+                    const activePairingId = pairingId || start?.pairingId || "";
+                    if (!pairingId && start?.challenge) {
+                      setPairingHint(start.challenge);
+                    }
+
+                    const result = await api.completePairing({
+                      pairingId: activePairingId,
+                      code,
+                      passphrase: pass,
+                      deviceName: "iPhone 17 Pro Max",
+                    });
+
+                    if (!result.paired || !result.gatewayToken) {
+                      setToast({
+                        open: true,
+                        message: result.error || "Re-emparelhamento falhou.",
+                        tone: "danger",
+                      });
+                      return;
+                    }
+
+                    api.setGatewayApiKey(result.gatewayToken);
+                    const nextHealth = await loadHealth();
+                    setPairingId("");
+                    setPairingHint("------");
+                    setPairingCode("");
+                    setPairingPassphrase("");
+
+                    if (nextHealth.connectionState === "LIVE_MODE") {
+                      setToast({
+                        open: true,
+                        message: "Dispositivo re-emparelhado e ligado em LIVE_MODE.",
+                        tone: "success",
+                      });
+                    } else {
+                      setToast({
+                        open: true,
+                        message: "Re-emparelhado. Verifique estado do túnel/gateway.",
+                        tone: "info",
+                      });
+                    }
+                  } catch {
+                    setToast({
+                      open: true,
+                      message: "Erro inesperado durante re-emparelhamento.",
+                      tone: "danger",
+                    });
+                  } finally {
+                    setPairingBusy(false);
+                  }
+                }}
+              >
+                {pairingBusy ? "A confirmar..." : "Confirmar e guardar token"}
+              </ActionButton>
+            </VistaCard>
+
+            <VistaCard className="space-y-3">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-100">Gateway access token</h2>
+                <p className="text-sm text-slate-400">
+                  Necessário para autenticar a PWA no gateway local.
+                </p>
+              </div>
+
+              <Input
+                value={gatewayToken}
+                onChange={(event) => setGatewayToken(event.target.value)}
+                placeholder="Cole aqui o token local do gateway"
+                className="h-[52px] rounded-[18px] border-white/16 bg-white/8 text-slate-100 placeholder:text-slate-500"
+              />
+
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <ActionButton
+                  tone="primary"
+                  onClick={async () => {
+                    const value = gatewayToken.trim();
+                    if (!value) {
+                      setToast({
+                        open: true,
+                        message: "Introduza um token antes de guardar.",
+                        tone: "danger",
+                      });
+                      return;
+                    }
+
+                    api.setGatewayApiKey(value);
+                    const nextHealth = await loadHealth();
+
+                    if (nextHealth.connectionState === "LIVE_MODE") {
+                      setToast({
+                        open: true,
+                        message: "Token válido. Ligação live ativa.",
+                        tone: "success",
+                      });
+                      setGatewayToken("");
+                      return;
+                    }
+
+                    setToast({
+                      open: true,
+                      message: "Token guardado, mas ligação ainda parcial. Verifique gateway/tunnel.",
+                      tone: "info",
+                    });
+                  }}
+                >
+                  Guardar e testar
+                </ActionButton>
+
+                <ActionButton
+                  tone="danger"
+                  onClick={async () => {
+                    api.setGatewayApiKey("");
+                    setGatewayToken("");
+                    await loadHealth();
+                    setToast({
+                      open: true,
+                      message: "Token removido deste browser.",
+                      tone: "info",
+                    });
+                  }}
+                >
+                  Limpar token
+                </ActionButton>
+              </div>
+            </VistaCard>
+          </>
+        ) : null}
 
         <div className="space-y-2">
           {sections.map((section) => (
