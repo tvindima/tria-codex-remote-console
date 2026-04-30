@@ -27,7 +27,9 @@
 
 html,
 body {
+  height: 100%;
   min-height: 100%;
+  overflow: hidden;
 }
 
 body {
@@ -36,6 +38,7 @@ body {
   color: #f8fafc;
   -webkit-font-smoothing: antialiased;
   font-family: Inter, -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif;
+  overscroll-behavior-y: none;
 }
 
 a {

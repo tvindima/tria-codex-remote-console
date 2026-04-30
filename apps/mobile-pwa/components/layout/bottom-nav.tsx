@@ -3,7 +3,9 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { AlertTriangle, FolderKanban, House, Settings, Workflow } from "lucide-react";
+import { useEffect, useState } from "react";
 
+import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const navItems = [
@@ -23,12 +25,34 @@ const isActive = (pathname: string, href: string) => {
 
 export function BottomNav() {
   const pathname = usePathname();
+  const [hasAlerts, setHasAlerts] = useState(api.mode === "demo");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const load = async () => {
+      const approvals = await api.getApprovals();
+      const pending = (approvals.items ?? []).some((approval) => approval.status === "pending");
+      if (!cancelled) {
+        setHasAlerts(pending);
+      }
+    };
+
+    load();
+    const timer = setInterval(load, 10000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, []);
 
   return (
-    <nav className="mobile-safe fixed bottom-2 left-1/2 z-40 w-[calc(100vw-1.25rem)] max-w-[452px] -translate-x-1/2 rounded-[26px] border border-white/14 bg-white/10 px-2 py-2 backdrop-blur-xl shadow-[0_20px_60px_rgba(0,0,0,0.4)]">
+    <nav className="mobile-safe absolute inset-x-2 bottom-2 z-40 rounded-[26px] border border-white/14 bg-white/10 px-2 py-2 backdrop-blur-xl shadow-[0_20px_60px_rgba(0,0,0,0.4)]">
       <ul className="flex items-center justify-between gap-1">
         {navItems.map(({ label, href, icon: Icon, badge }) => {
           const active = isActive(pathname, href);
+          const showBadge = badge ? hasAlerts : false;
 
           return (
             <li key={href} className="relative flex-1">
@@ -43,7 +67,7 @@ export function BottomNav() {
               >
                 <div className="relative">
                   <Icon className={cn("h-4 w-4", active ? "text-blue-300" : "text-slate-400")} />
-                  {badge ? (
+                  {showBadge ? (
                     <span className="absolute -right-2 -top-2 h-2.5 w-2.5 rounded-full bg-blue-400 shadow-[0_0_0_2px_rgba(5,7,11,0.8)]" />
                   ) : null}
                 </div>

@@ -1,7 +1,12 @@
-import { ReactNode } from "react";
+"use client";
+
+import { ReactNode, useEffect, useMemo, useState } from "react";
 
 import { BottomNav } from "@/components/layout/bottom-nav";
 import { MobileFrame } from "@/components/layout/mobile-frame";
+import { StatusPill } from "@/components/vistaulux/status-pill";
+import { api } from "@/lib/api";
+import { GatewayHealth } from "@/lib/types";
 
 interface AppShellProps {
   title: string;
@@ -18,6 +23,45 @@ export function AppShell({
   children,
   showNav = true,
 }: AppShellProps) {
+  const [health, setHealth] = useState<GatewayHealth | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const load = async () => {
+      const result = await api.health();
+      if (!cancelled) {
+        setHealth(result);
+      }
+    };
+
+    load();
+    const timer = setInterval(load, 12000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, []);
+
+  const connectionStatus = useMemo(() => {
+    if (!health) {
+      return api.mode === "demo" ? "demo_mode" : "partial_connection";
+    }
+
+    return health.connectionState.toLowerCase();
+  }, [health]);
+
+  // Runtime mode label is configuration-driven; connectivity is shown separately by StatusPill.
+  const modeTag = api.mode === "live" ? "LIVE MODE" : "DEMO MODE";
+  const metaInfo = health
+    ? `Adapter: ${health.codex.adapter} · Tunnel: ${health.tunnel.provider ?? health.tunnel.mode}`
+    : api.mode === "live"
+      ? api.hasGatewayApiKey()
+        ? "Connecting to local gateway..."
+        : "Live mode requires pairing + local gateway access token."
+      : "Sample data active";
+
   return (
     <MobileFrame>
       <header className="mb-4 space-y-2 px-1">
@@ -25,12 +69,22 @@ export function AppShell({
           <div>
             <h1 className="text-[30px] font-bold leading-[1.04] text-slate-50">{title}</h1>
             {subtitle ? <p className="mt-1 text-sm text-slate-300">{subtitle}</p> : null}
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <StatusPill
+                status={connectionStatus}
+                pulse={connectionStatus === "live_mode" || connectionStatus === "partial_connection"}
+              />
+              <span className="inline-flex rounded-full border border-white/12 bg-white/8 px-2.5 py-1 text-[11px] font-semibold tracking-wide text-slate-200">
+                {modeTag}
+              </span>
+            </div>
+            <p className="mt-1.5 text-[11px] text-slate-400">{metaInfo}</p>
           </div>
           {meta}
         </div>
       </header>
 
-      <main className="flex-1 overflow-y-auto pb-4">{children}</main>
+      <main className="flex-1 overflow-y-auto pb-32">{children}</main>
 
       {showNav ? <BottomNav /> : null}
     </MobileFrame>
