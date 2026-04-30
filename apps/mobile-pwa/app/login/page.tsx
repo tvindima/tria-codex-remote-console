@@ -194,7 +194,7 @@ export default function LoginPage() {
               <Input
                 value={pairingPassphrase}
                 onChange={(event) => setPairingPassphrase(event.target.value)}
-                placeholder="Palavra-passe de emparelhamento (ou token)"
+                placeholder="Palavra-passe de emparelhamento"
                 className="h-[52px] rounded-[18px] border-white/16 bg-white/8 text-slate-100 placeholder:text-slate-500"
               />
             ) : null}
@@ -241,21 +241,16 @@ export default function LoginPage() {
                       return;
                     }
 
-                    const resolvedToken =
-                      response.gatewayToken ??
-                      (pairingPassphrase.trim().length >= 32 ? pairingPassphrase.trim() : "");
-
-                    if (!resolvedToken) {
+                    if (!response.gatewayToken) {
                       setToast({
                         open: true,
-                        message:
-                          "Gateway ainda sem token de pairing automático. Cole token local neste campo.",
-                        tone: "info",
+                        message: "Emparelhado sem token de sessão. Verifique o gateway de pairing.",
+                        tone: "danger",
                       });
                       return;
                     }
 
-                    api.setGatewayApiKey(resolvedToken);
+                    api.setGatewayApiKey(response.gatewayToken);
                     const nextHealth = await api.health();
                     setHealth(nextHealth);
                     setNode(nextHealth.node);

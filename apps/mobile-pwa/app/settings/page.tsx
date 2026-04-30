@@ -24,7 +24,6 @@ const sections = [
 
 export default function SettingsPage() {
   const [health, setHealth] = useState<GatewayHealth | null>(null);
-  const [gatewayToken, setGatewayToken] = useState("");
   const [pairingId, setPairingId] = useState("");
   const [pairingHint, setPairingHint] = useState("------");
   const [pairingCode, setPairingCode] = useState("");
@@ -145,6 +144,24 @@ export default function SettingsPage() {
                 >
                   Limpar formulário
                 </ActionButton>
+
+                <ActionButton
+                  onClick={async () => {
+                    api.setGatewayApiKey("");
+                    setPairingId("");
+                    setPairingHint("------");
+                    setPairingCode("");
+                    setPairingPassphrase("");
+                    await loadHealth();
+                    setToast({
+                      open: true,
+                      message: "Sessão removida deste dispositivo.",
+                      tone: "info",
+                    });
+                  }}
+                >
+                  Desemparelhar dispositivo
+                </ActionButton>
               </div>
 
               <Input
@@ -231,78 +248,8 @@ export default function SettingsPage() {
                   }
                 }}
               >
-                {pairingBusy ? "A confirmar..." : "Confirmar e guardar token"}
+                {pairingBusy ? "A confirmar..." : "Confirmar emparelhamento"}
               </ActionButton>
-            </VistaCard>
-
-            <VistaCard className="space-y-3">
-              <div>
-                <h2 className="text-lg font-semibold text-slate-100">Gateway access token</h2>
-                <p className="text-sm text-slate-400">
-                  Necessário para autenticar a PWA no gateway local.
-                </p>
-              </div>
-
-              <Input
-                value={gatewayToken}
-                onChange={(event) => setGatewayToken(event.target.value)}
-                placeholder="Cole aqui o token local do gateway"
-                className="h-[52px] rounded-[18px] border-white/16 bg-white/8 text-slate-100 placeholder:text-slate-500"
-              />
-
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                <ActionButton
-                  tone="primary"
-                  onClick={async () => {
-                    const value = gatewayToken.trim();
-                    if (!value) {
-                      setToast({
-                        open: true,
-                        message: "Introduza um token antes de guardar.",
-                        tone: "danger",
-                      });
-                      return;
-                    }
-
-                    api.setGatewayApiKey(value);
-                    const nextHealth = await loadHealth();
-
-                    if (nextHealth.connectionState === "LIVE_MODE") {
-                      setToast({
-                        open: true,
-                        message: "Token válido. Ligação live ativa.",
-                        tone: "success",
-                      });
-                      setGatewayToken("");
-                      return;
-                    }
-
-                    setToast({
-                      open: true,
-                      message: "Token guardado, mas ligação ainda parcial. Verifique gateway/tunnel.",
-                      tone: "info",
-                    });
-                  }}
-                >
-                  Guardar e testar
-                </ActionButton>
-
-                <ActionButton
-                  tone="danger"
-                  onClick={async () => {
-                    api.setGatewayApiKey("");
-                    setGatewayToken("");
-                    await loadHealth();
-                    setToast({
-                      open: true,
-                      message: "Token removido deste browser.",
-                      tone: "info",
-                    });
-                  }}
-                >
-                  Limpar token
-                </ActionButton>
-              </div>
             </VistaCard>
           </>
         ) : null}
