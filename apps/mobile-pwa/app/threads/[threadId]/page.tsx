@@ -40,6 +40,7 @@ import { api } from "@/lib/api";
 import { mockTerminalLines } from "@/lib/mock-data";
 import {
   DeliveryErrorCode,
+  JobStatusResponse,
   JobStatusEvent,
   MessageLifecycleStatus,
   ThreadMessage,
@@ -215,6 +216,17 @@ function formatTimestampLabel(timestamp: string) {
   });
 }
 
+function toReadableDateTime(value: string | null) {
+  if (!value) {
+    return "—";
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return parsed.toLocaleString();
+}
+
 export default function ThreadDetailPage() {
   const params = useParams<{ threadId: string }>();
   const router = useRouter();
@@ -253,6 +265,10 @@ export default function ThreadDetailPage() {
   const [atBottom, setAtBottom] = useState(true);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [isSending, setIsSending] = useState(false);
+  const [jobProofById, setJobProofById] = useState<Record<string, JobStatusResponse>>({});
+  const [jobEventsById, setJobEventsById] = useState<Record<string, JobStatusEvent[]>>({});
+  const [proofModalJobId, setProofModalJobId] = useState<string | null>(null);
+  const [proofLoading, setProofLoading] = useState(false);
 
   const selectedAgent = useMemo(
     () => AGENTS.find((agent) => agent.id === selectedAgentId) ?? AGENTS[0],
@@ -360,6 +376,33 @@ export default function ThreadDetailPage() {
     [],
   );
 
+  const upsertJobProof = useCallback((job: JobStatusResponse) => {
+    setJobProofById((previous) => ({
+      ...previous,
+      [job.jobId]: job,
+    }));
+  }, []);
+
+  const loadJobProof = useCallback(
+    async (jobId: string) => {
+      setProofLoading(true);
+      try {
+        const [job, events] = await Promise.all([
+          api.getJob(jobId),
+          api.getJobEventsHistory(jobId),
+        ]);
+        upsertJobProof(job);
+        setJobEventsById((previous) => ({
+          ...previous,
+          [jobId]: events.items,
+        }));
+      } finally {
+        setProofLoading(false);
+      }
+    },
+    [upsertJobProof],
+  );
+
   const applyJobEvent = useCallback(
     (event: JobStatusEvent) => {
       trackedJobsRef.current.set(event.serverMessageId, event.jobId);
@@ -368,6 +411,37 @@ export default function ThreadDetailPage() {
         status: event.status,
         errorCode: event.errorCode,
         errorMessage: event.errorMessage,
+      });
+      setJobEventsById((previous) => {
+        const current = previous[event.jobId] ?? [];
+        if (current.some((item) => item.id === event.id)) {
+          return previous;
+        }
+        return {
+          ...previous,
+          [event.jobId]: [...current, event],
+        };
+      });
+      setJobProofById((previous) => {
+        const proof = previous[event.jobId];
+        if (!proof) {
+          return previous;
+        }
+        return {
+          ...previous,
+          [event.jobId]: {
+            ...proof,
+            status: event.status,
+            lastEventAt: event.createdAt,
+            error:
+              event.errorCode || event.errorMessage
+                ? {
+                    code: event.errorCode ?? null,
+                    message: event.errorMessage ?? null,
+                  }
+                : proof.error,
+          },
+        };
       });
 
       if (event.status === "failed") {
@@ -449,6 +523,7 @@ export default function ThreadDetailPage() {
       const pollOnce = async () => {
         try {
           const job = await api.getJob(jobId);
+          upsertJobProof(job);
           applyJobEvent({
             id: Date.now(),
             jobId: job.jobId,
@@ -502,7 +577,7 @@ export default function ThreadDetailPage() {
 
       trackedJobsRef.current.set(serverMessageId, jobId);
     },
-    [applyJobEvent, stopJobPolling],
+    [applyJobEvent, stopJobPolling, upsertJobProof],
   );
 
   const loadThreadContext = useCallback(async () => {
@@ -940,6 +1015,7 @@ export default function ThreadDetailPage() {
   };
 
   const renderDeliveryState = (delivery: NonNullable<ThreadMessage["delivery"]>) => {
+    const proofJobId = delivery.jobId;
     const gatewayDone = GATEWAY_CONFIRMED_STATES.has(delivery.status);
     const codexDone = CODEX_CONFIRMED_STATES.has(delivery.status);
     const running = RUNNING_STATES.has(delivery.status);
@@ -979,6 +1055,18 @@ export default function ThreadDetailPage() {
           >
             {failed ? "Failed" : running ? "Running" : statusLabel}
           </span>
+          {proofJobId ? (
+            <button
+              type="button"
+              onClick={() => {
+                setProofModalJobId(proofJobId);
+                void loadJobProof(proofJobId);
+              }}
+              className="rounded-full border border-white/14 bg-white/8 px-2 py-0.5 text-[10px] font-semibold text-slate-200"
+            >
+              Delivery Proof
+            </button>
+          ) : null}
         </div>
         {failed ? <p className="text-[10px] text-rose-200">{failedText}</p> : null}
       </div>
@@ -1082,6 +1170,9 @@ export default function ThreadDetailPage() {
           <p className="mt-1 break-words text-xs text-slate-400 [overflow-wrap:anywhere]">
             Agent: {selectedAgent.label} · Adapter: {adapterLabel} · Tunnel: {tunnelLabel} ·
             Branch: {branch}
+          </p>
+          <p className="mt-1 break-words text-[11px] text-slate-500 [overflow-wrap:anywhere]">
+            Execução remota: Codex Worker (headless) via {adapterLabel}
           </p>
           <div className="mt-2 flex items-center gap-2">
             <button
@@ -1342,6 +1433,119 @@ export default function ThreadDetailPage() {
                 <Shield className="h-3.5 w-3.5" />
                 Comandos sensíveis continuam a exigir approval.
               </span>
+            </div>
+          </aside>
+        </div>
+      ) : null}
+
+      {proofModalJobId ? (
+        <div className="absolute inset-0 z-[70]">
+          <button
+            type="button"
+            onClick={() => setProofModalJobId(null)}
+            className="absolute inset-0 bg-black/70"
+            aria-label="Close delivery proof"
+          />
+          <aside className="absolute inset-x-3 bottom-4 top-14 flex min-h-0 flex-col rounded-3xl border border-white/14 bg-[#09101b]/96 p-4 shadow-[0_28px_70px_rgba(0,0,0,0.65)] backdrop-blur-xl md:inset-x-10">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div>
+                <p className="text-lg font-semibold text-slate-100">Delivery Proof</p>
+                <p className="text-xs text-slate-400">Job {proofModalJobId}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setProofModalJobId(null)}
+                className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/14 bg-white/8 text-slate-200"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
+              {proofLoading ? (
+                <div className="rounded-2xl border border-white/14 bg-white/8 px-3 py-2 text-xs text-slate-300">
+                  A carregar prova técnica...
+                </div>
+              ) : null}
+
+              {jobProofById[proofModalJobId] ? (
+                <div className="space-y-3">
+                  <div className="grid gap-2 md:grid-cols-2">
+                    <div className="rounded-2xl border border-emerald-400/35 bg-emerald-500/10 px-3 py-2">
+                      <p className="text-[11px] uppercase tracking-wide text-emerald-300">Gateway</p>
+                      <p className="text-sm font-semibold text-emerald-100">✓ ACK</p>
+                    </div>
+                    <div className="rounded-2xl border border-blue-400/35 bg-blue-500/10 px-3 py-2">
+                      <p className="text-[11px] uppercase tracking-wide text-blue-300">Codex Worker</p>
+                      <p className="text-sm font-semibold text-blue-100">
+                        {jobProofById[proofModalJobId].status === "failed" ? "✗ Failed" : "✓ Running/Done"}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-white/14 bg-white/8 p-3 text-xs text-slate-200">
+                    <p>Worker mode: {jobProofById[proofModalJobId].workerMode}</p>
+                    <p>Adapter: {jobProofById[proofModalJobId].adapter}</p>
+                    <p>Job ID: {jobProofById[proofModalJobId].jobId}</p>
+                    <p>Thread ID: {jobProofById[proofModalJobId].threadId}</p>
+                    <p>Message ID: {jobProofById[proofModalJobId].messageId}</p>
+                    <p>codexThreadId: {jobProofById[proofModalJobId].codexThreadId ?? "—"}</p>
+                    <p>ptySessionId: {jobProofById[proofModalJobId].ptySessionId ?? "—"}</p>
+                    <p>PID: {jobProofById[proofModalJobId].processPid ?? "—"}</p>
+                    <p>Status: {jobProofById[proofModalJobId].status}</p>
+                    <p>Started: {toReadableDateTime(jobProofById[proofModalJobId].startedAt)}</p>
+                    <p>Completed: {toReadableDateTime(jobProofById[proofModalJobId].completedAt)}</p>
+                  </div>
+
+                  <div className="rounded-2xl border border-white/14 bg-white/8 p-3 text-xs text-slate-200">
+                    <p className="mb-1 text-[11px] uppercase tracking-wide text-slate-400">Input command</p>
+                    <pre className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+                      {jobProofById[proofModalJobId].inputCommand}
+                    </pre>
+                    <p className="mb-1 mt-3 text-[11px] uppercase tracking-wide text-slate-400">Executed command</p>
+                    <pre className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+                      {jobProofById[proofModalJobId].executedCommand ?? "—"}
+                    </pre>
+                  </div>
+
+                  <div className="rounded-2xl border border-white/14 bg-white/8 p-3 text-xs text-slate-200">
+                    <p className="mb-1 text-[11px] uppercase tracking-wide text-slate-400">stdout</p>
+                    <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+                      {jobProofById[proofModalJobId].stdout ?? "—"}
+                    </pre>
+                    <p className="mb-1 mt-3 text-[11px] uppercase tracking-wide text-slate-400">stderr</p>
+                    <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+                      {jobProofById[proofModalJobId].stderr ?? "—"}
+                    </pre>
+                  </div>
+
+                  <div className="rounded-2xl border border-white/14 bg-white/8 p-3 text-xs text-slate-200">
+                    <p className="mb-2 text-[11px] uppercase tracking-wide text-slate-400">Events log</p>
+                    <div className="space-y-1">
+                      {(jobEventsById[proofModalJobId] ?? []).map((event) => (
+                        <div
+                          key={`${event.id}-${event.createdAt}`}
+                          className="rounded-xl border border-white/10 bg-black/20 px-2 py-1.5"
+                        >
+                          <p className="text-[11px] font-semibold text-slate-100">{event.status}</p>
+                          <p className="text-[10px] text-slate-400">{toReadableDateTime(event.createdAt)}</p>
+                          {event.errorCode || event.errorMessage ? (
+                            <p className="text-[10px] text-rose-200">
+                              {event.errorCode ?? "error"} · {event.errorMessage ?? "—"}
+                            </p>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                !proofLoading && (
+                  <div className="rounded-2xl border border-white/14 bg-white/8 px-3 py-2 text-xs text-slate-300">
+                    Sem prova disponível para este job.
+                  </div>
+                )
+              )}
             </div>
           </aside>
         </div>

@@ -13,7 +13,16 @@ export async function registerJobsRoutes(app: FastifyInstance) {
       threadId: job.threadId,
       messageId: job.serverMessageId,
       status: job.status,
+      workerMode: job.workerMode,
       adapter: job.adapter,
+      inputCommand: job.inputCommand,
+      executedCommand: job.executedCommand,
+      codexThreadId: job.codexThreadId,
+      ptySessionId: job.ptySessionId,
+      processPid: job.processPid,
+      stdout: job.stdout,
+      stderr: job.stderr,
+      exitCode: job.exitCode,
       attempts: job.attempts,
       createdAt: job.createdAt,
       startedAt: job.startedAt,
@@ -27,6 +36,31 @@ export async function registerJobsRoutes(app: FastifyInstance) {
               message: job.lastError,
             }
           : null,
+    };
+  });
+
+  app.get<{
+    Params: { jobId: string };
+    Querystring: { afterId?: string; limit?: string };
+  }>("/api/jobs/:jobId/events/history", async (request, reply) => {
+    const job = await app.messageJobService.getJob(request.params.jobId);
+    if (!job) {
+      reply.code(404);
+      return { error: "Job not found" };
+    }
+
+    const afterId = Number(request.query?.afterId ?? "0");
+    const limitRaw = Number(request.query?.limit ?? "200");
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(2000, Math.floor(limitRaw))) : 200;
+
+    const events = await app.messageJobService.listEvents(
+      request.params.jobId,
+      Number.isFinite(afterId) ? Math.max(0, Math.floor(afterId)) : 0,
+    );
+
+    return {
+      jobId: request.params.jobId,
+      items: events.slice(-limit),
     };
   });
 
@@ -83,4 +117,3 @@ export async function registerJobsRoutes(app: FastifyInstance) {
     request.raw.on("close", close);
   });
 }
-

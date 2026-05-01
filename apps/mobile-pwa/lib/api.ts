@@ -15,6 +15,7 @@ import {
   DeliveryErrorCode,
   DiffFile,
   GatewayHealth,
+  JobEventsHistoryResponse,
   JobStatusEvent,
   JobStatusResponse,
   MessageSendResponse,
@@ -680,7 +681,16 @@ export const api = {
         threadId: "demo-thread",
         messageId: `demo-message-${Date.now()}`,
         status: "codex_response_completed",
+        workerMode: "demo-worker",
         adapter: "demo",
+        inputCommand: "echo demo",
+        executedCommand: "codex exec resume demo-thread 'echo demo'",
+        codexThreadId: "demo-thread",
+        ptySessionId: "demo-pty-001",
+        processPid: 1001,
+        stdout: "demo stdout",
+        stderr: "",
+        exitCode: 0,
         attempts: 1,
         createdAt: new Date().toISOString(),
         startedAt: new Date().toISOString(),
@@ -692,6 +702,17 @@ export const api = {
     }
 
     return fetchLive<JobStatusResponse>(`/api/jobs/${jobId}`);
+  },
+
+  async getJobEventsHistory(jobId: string): Promise<JobEventsHistoryResponse> {
+    if (!live) {
+      return {
+        jobId,
+        items: [],
+      };
+    }
+
+    return fetchLive<JobEventsHistoryResponse>(`/api/jobs/${jobId}/events/history`);
   },
 
   subscribeJobEvents(

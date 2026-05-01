@@ -172,7 +172,16 @@ export interface JobStatusResponse {
   threadId: string;
   messageId: string;
   status: MessageLifecycleStatus;
+  workerMode: string;
   adapter: string;
+  inputCommand: string;
+  executedCommand: string | null;
+  codexThreadId: string | null;
+  ptySessionId: string | null;
+  processPid: number | null;
+  stdout: string | null;
+  stderr: string | null;
+  exitCode: number | null;
   attempts: number;
   createdAt: string;
   startedAt: string | null;
@@ -195,4 +204,9 @@ export interface JobStatusEvent {
   errorMessage: string | null;
   payload: Record<string, unknown> | null;
   createdAt: string;
+}
+
+export interface JobEventsHistoryResponse {
+  jobId: string;
+  items: JobStatusEvent[];
 }

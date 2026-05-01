@@ -38,8 +38,16 @@ export interface MessageJobRecord {
   clientMessageId: string | null;
   serverMessageId: string;
   status: MessageLifecycleStatus;
+  workerMode: string;
   adapter: string;
-  command: string;
+  inputCommand: string;
+  executedCommand: string | null;
+  codexThreadId: string | null;
+  ptySessionId: string | null;
+  processPid: number | null;
+  stdout: string | null;
+  stderr: string | null;
+  exitCode: number | null;
   attempts: number;
   lastErrorCode: DeliveryErrorCode | null;
   lastError: string | null;
@@ -82,6 +90,31 @@ const STATUS_AUDIT_EVENT: Partial<Record<MessageLifecycleStatus, string>> = {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function escapeShellArg(input: string) {
+  if (!input.length) {
+    return "''";
+  }
+
+  return `'${input.replace(/'/g, `'\\''`)}'`;
+}
+
+function compactOutput(input: string, limit = 6000) {
+  const normalized = String(input ?? "")
+    // Strip ANSI escape sequences and non-printable control chars that can break payload parsing.
+    .replace(/\u001b\[[0-9;]*[A-Za-z]/g, "")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
+    .trim();
+  if (!normalized) {
+    return "";
+  }
+
+  if (normalized.length <= limit) {
+    return normalized;
+  }
+
+  return normalized.slice(-limit);
 }
 
 function toMs(timestamp: string) {
@@ -134,6 +167,21 @@ export class MessageJobService {
     this.workerTimer = setInterval(() => {
       void this.processQueue();
     }, 900);
+  }
+
+  private async ensureColumn(table: string, definition: string) {
+    const db = await this.db();
+
+    try {
+      await db.exec(`ALTER TABLE ${table} ADD COLUMN ${definition};`);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+      if (message.includes("duplicate column name")) {
+        return;
+      }
+      throw error;
+    }
   }
 
   private async ensureSchema() {
@@ -203,6 +251,15 @@ export class MessageJobService {
       CREATE INDEX IF NOT EXISTS idx_thread_messages_delivery_thread
       ON thread_messages_delivery(thread_id, created_at);
     `);
+
+    await this.ensureColumn("message_jobs", "worker_mode TEXT");
+    await this.ensureColumn("message_jobs", "executed_command TEXT");
+    await this.ensureColumn("message_jobs", "codex_thread_id TEXT");
+    await this.ensureColumn("message_jobs", "pty_session_id TEXT");
+    await this.ensureColumn("message_jobs", "process_pid INTEGER");
+    await this.ensureColumn("message_jobs", "stdout_tail TEXT");
+    await this.ensureColumn("message_jobs", "stderr_tail TEXT");
+    await this.ensureColumn("message_jobs", "exit_code INTEGER");
   }
 
   private async recoverStaleJobs() {
@@ -376,6 +433,67 @@ export class MessageJobService {
     return event;
   }
 
+  private async updateJobProof(
+    jobId: string,
+    patch: {
+      workerMode?: string | null;
+      executedCommand?: string | null;
+      codexThreadId?: string | null;
+      ptySessionId?: string | null;
+      processPid?: number | null;
+      stdout?: string | null;
+      stderr?: string | null;
+      exitCode?: number | null;
+    },
+  ) {
+    const updates: string[] = [];
+    const values: Array<string | number | null> = [];
+
+    if (Object.prototype.hasOwnProperty.call(patch, "workerMode")) {
+      updates.push("worker_mode = ?");
+      values.push(patch.workerMode ?? null);
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "executedCommand")) {
+      updates.push("executed_command = ?");
+      values.push(patch.executedCommand ?? null);
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "codexThreadId")) {
+      updates.push("codex_thread_id = ?");
+      values.push(patch.codexThreadId ?? null);
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "ptySessionId")) {
+      updates.push("pty_session_id = ?");
+      values.push(patch.ptySessionId ?? null);
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "processPid")) {
+      updates.push("process_pid = ?");
+      values.push(typeof patch.processPid === "number" ? patch.processPid : null);
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "stdout")) {
+      updates.push("stdout_tail = ?");
+      values.push(patch.stdout ?? null);
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "stderr")) {
+      updates.push("stderr_tail = ?");
+      values.push(patch.stderr ?? null);
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "exitCode")) {
+      updates.push("exit_code = ?");
+      values.push(typeof patch.exitCode === "number" ? patch.exitCode : null);
+    }
+
+    if (!updates.length) {
+      return;
+    }
+
+    updates.push("updated_at = ?");
+    values.push(nowIso());
+    values.push(jobId);
+
+    const db = await this.db();
+    await db.run(`UPDATE message_jobs SET ${updates.join(", ")} WHERE id = ?;`, values);
+  }
+
   async listEvents(jobId: string, afterId = 0): Promise<MessageJobEvent[]> {
     const db = await this.db();
     const rows = await db.all<{
@@ -420,8 +538,16 @@ export class MessageJobService {
       client_message_id: string | null;
       message_id: string;
       status: string;
+      worker_mode: string | null;
       adapter: string;
       command: string;
+      executed_command: string | null;
+      codex_thread_id: string | null;
+      pty_session_id: string | null;
+      process_pid: number | null;
+      stdout_tail: string | null;
+      stderr_tail: string | null;
+      exit_code: number | null;
       attempts: number;
       last_error_code: string | null;
       last_error: string | null;
@@ -431,8 +557,10 @@ export class MessageJobService {
       updated_at: string;
     }>(
       `
-      SELECT id, thread_id, client_message_id, message_id, status, adapter, command, attempts,
-             last_error_code, last_error, created_at, started_at, completed_at, updated_at
+      SELECT id, thread_id, client_message_id, message_id, status, worker_mode, adapter, command,
+             executed_command, codex_thread_id, pty_session_id, process_pid, stdout_tail,
+             stderr_tail, exit_code, attempts, last_error_code, last_error, created_at, started_at,
+             completed_at, updated_at
       FROM message_jobs
       WHERE id = ?
       LIMIT 1;
@@ -461,8 +589,16 @@ export class MessageJobService {
       clientMessageId: job.client_message_id,
       serverMessageId: job.message_id,
       status: job.status as MessageLifecycleStatus,
+      workerMode: job.worker_mode || "codex-worker",
       adapter: job.adapter,
-      command: job.command,
+      inputCommand: job.command,
+      executedCommand: job.executed_command,
+      codexThreadId: job.codex_thread_id,
+      ptySessionId: job.pty_session_id,
+      processPid: typeof job.process_pid === "number" ? job.process_pid : null,
+      stdout: job.stdout_tail,
+      stderr: job.stderr_tail,
+      exitCode: typeof job.exit_code === "number" ? job.exit_code : null,
       attempts: Number(job.attempts ?? 0),
       lastErrorCode: (job.last_error_code as DeliveryErrorCode | null) ?? null,
       lastError: job.last_error,
@@ -532,8 +668,16 @@ export class MessageJobService {
         message_id,
         client_message_id,
         status,
+        worker_mode,
         adapter,
         command,
+        executed_command,
+        codex_thread_id,
+        pty_session_id,
+        process_pid,
+        stdout_tail,
+        stderr_tail,
+        exit_code,
         attempts,
         last_error_code,
         last_error,
@@ -541,7 +685,7 @@ export class MessageJobService {
         started_at,
         completed_at,
         updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, ?, NULL, NULL, ?);
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, ?, NULL, NULL, ?);
       `,
       [
         jobId,
@@ -549,8 +693,16 @@ export class MessageJobService {
         serverMessageId,
         clientMessageId,
         "created_local",
+        "codex-worker",
         adapter,
         command,
+        null,
+        thread.id,
+        null,
+        null,
+        null,
+        null,
+        null,
         createdAt,
         createdAt,
       ],
@@ -858,18 +1010,42 @@ export class MessageJobService {
     );
     const executionCwd = fs.existsSync(thread.cwd) ? thread.cwd : process.cwd();
     const timeoutMs = Number(process.env.TRIA_CODEX_EXEC_TIMEOUT_MS ?? 45000);
+    const commandArgs = [
+      "exec",
+      "resume",
+      thread.id,
+      job.command,
+      "--output-last-message",
+      outputFile,
+      "--skip-git-repo-check",
+    ];
+    const executedCommand = `codex ${commandArgs.map((arg) => escapeShellArg(arg)).join(" ")}`;
+    let stdoutBuffer = "";
+    let stderrBuffer = "";
 
     try {
+      await this.updateJobProof(job.id, {
+        workerMode: "codex-worker",
+        executedCommand,
+        codexThreadId: thread.id,
+      });
+
       await this.recordEvent(ref, "delivered_to_codex", {
         started: true,
         attemptsIncrement: true,
         payload: {
+          workerMode: "codex-worker",
           adapter: job.adapter,
+          command: executedCommand,
+          codexThreadId: thread.id,
         },
       });
       await this.recordEvent(ref, "codex_running", {
         payload: {
+          workerMode: "codex-worker",
           adapter: job.adapter,
+          command: executedCommand,
+          codexThreadId: thread.id,
         },
       });
 
@@ -884,36 +1060,45 @@ export class MessageJobService {
         });
       };
 
-      const subprocess = execa(
-        "codex",
-        [
-          "exec",
-          "resume",
-          thread.id,
-          job.command,
-          "--output-last-message",
-          outputFile,
-          "--skip-git-repo-check",
-        ],
-        {
-          cwd: executionCwd,
-          reject: false,
-          timeout: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : undefined,
-          env: {
-            ...process.env,
-            TERM: "dumb",
-          },
+      const subprocess = execa("codex", commandArgs, {
+        cwd: executionCwd,
+        reject: false,
+        timeout: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : undefined,
+        env: {
+          ...process.env,
+          TERM: "dumb",
         },
-      );
+      });
+      const processPid =
+        typeof subprocess.pid === "number" && Number.isFinite(subprocess.pid)
+          ? subprocess.pid
+          : null;
+      await this.updateJobProof(job.id, {
+        processPid,
+        ptySessionId: processPid ? `cli-pty:${processPid}` : null,
+      });
 
-      subprocess.stdout?.on("data", () => {
+      subprocess.stdout?.on("data", (chunk) => {
+        stdoutBuffer = compactOutput(`${stdoutBuffer}${String(chunk ?? "")}`);
         void markResponseStarted("stdout");
       });
-      subprocess.stderr?.on("data", () => {
+      subprocess.stderr?.on("data", (chunk) => {
+        stderrBuffer = compactOutput(`${stderrBuffer}${String(chunk ?? "")}`);
         void markResponseStarted("stderr");
       });
 
       const run = await subprocess;
+      stdoutBuffer = compactOutput(`${stdoutBuffer}${String(run.stdout ?? "")}`);
+      stderrBuffer = compactOutput(`${stderrBuffer}${String(run.stderr ?? "")}`);
+      const normalizedExitCode = Number.isFinite(Number(run.exitCode))
+        ? Number(run.exitCode)
+        : null;
+      await this.updateJobProof(job.id, {
+        processPid,
+        stdout: stdoutBuffer || null,
+        stderr: stderrBuffer || null,
+        exitCode: normalizedExitCode,
+      });
 
       if (run.exitCode !== 0) {
         const mapped = this.mapExecutionError(run);
@@ -923,8 +1108,8 @@ export class MessageJobService {
           completed: true,
           payload: {
             exitCode: run.exitCode,
-            stderr: String(run.stderr ?? "").slice(0, 1200),
-            stdout: String(run.stdout ?? "").slice(0, 1200),
+            stderr: compactOutput(String(run.stderr ?? ""), 1800),
+            stdout: compactOutput(String(run.stdout ?? ""), 1800),
           },
         });
         return;
@@ -947,6 +1132,15 @@ export class MessageJobService {
       if (!assistantReply) {
         assistantReply = String(run.stdout ?? "").trim();
       }
+
+      if (!stdoutBuffer && assistantReply) {
+        stdoutBuffer = compactOutput(assistantReply);
+      }
+      await this.updateJobProof(job.id, {
+        stdout: stdoutBuffer || null,
+        stderr: stderrBuffer || null,
+        exitCode: normalizedExitCode,
+      });
 
       const assistantMessageId = `${job.message_id}:assistant`;
       await (await this.db()).run(
@@ -979,14 +1173,37 @@ export class MessageJobService {
         payload: {
           assistantMessageId,
           responseChars: assistantReply.length,
+          workerMode: "codex-worker",
+          adapter: job.adapter,
+          command: executedCommand,
+          codexThreadId: thread.id,
+          ptySessionId: processPid ? `cli-pty:${processPid}` : null,
+          processPid,
+          exitCode: normalizedExitCode,
         },
       });
     } catch (error) {
       const mapped = this.mapExecutionError(error);
+      const errorDetail =
+        error && typeof error === "object" && "message" in error
+          ? String((error as { message?: string }).message ?? "")
+          : "";
+      await this.updateJobProof(job.id, {
+        stderr: compactOutput(`${stderrBuffer}\n${errorDetail}`),
+        stdout: stdoutBuffer || null,
+      });
       await this.recordEvent(ref, "failed", {
         errorCode: mapped.code,
         errorMessage: mapped.message,
         completed: true,
+        payload: {
+          workerMode: "codex-worker",
+          adapter: job.adapter,
+          command: executedCommand,
+          codexThreadId: thread.id,
+          stdout: stdoutBuffer || null,
+          stderr: compactOutput(`${stderrBuffer}\n${errorDetail}`) || null,
+        },
       });
     } finally {
       if (fs.existsSync(outputFile)) {
