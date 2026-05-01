@@ -162,6 +162,10 @@ export class RuntimeService {
     }
   }
 
+  getAdapterLabel() {
+    return this.resolveAdapter();
+  }
+
   async health() {
     if (this.mode === "demo") {
       return {

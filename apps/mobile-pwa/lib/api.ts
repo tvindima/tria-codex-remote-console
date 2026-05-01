@@ -12,8 +12,12 @@ import {
   ApiRuntimeMode,
   ApprovalItem,
   AuditLog,
+  DeliveryErrorCode,
   DiffFile,
   GatewayHealth,
+  JobStatusEvent,
+  JobStatusResponse,
+  MessageSendResponse,
   ProjectSummary,
   ThreadMessage,
   ThreadSummary,
@@ -336,6 +340,11 @@ interface PairingCompleteResponse {
   error?: string;
 }
 
+interface SendMessageInput {
+  clientMessageId: string;
+  displayMessage?: string;
+}
+
 const live = API_MODE === "live";
 
 export const api = {
@@ -637,24 +646,95 @@ export const api = {
     return payload.items ?? [];
   },
 
-  async sendMessage(threadId: string, message: string): Promise<{
-    ok: boolean;
-    threadId?: string;
-    message?: string;
-    assistantReply?: string;
-    requiresApproval?: boolean;
-    approval?: ApprovalItem;
-    error?: string;
-  }> {
+  async sendMessage(
+    threadId: string,
+    message: string,
+    input: SendMessageInput,
+  ): Promise<MessageSendResponse> {
     if (!live) {
       await wait(180);
-      return { ok: true, threadId, message };
+      return {
+        ok: true,
+        threadId,
+        messageId: `demo-${Date.now()}`,
+        jobId: `demo-job-${Date.now()}`,
+        status: "codex_response_completed",
+        createdAt: new Date().toISOString(),
+      };
     }
 
-    return fetchLive(`/api/threads/${threadId}/messages`, {
+    return fetchLive<MessageSendResponse>(`/api/threads/${threadId}/messages`, {
       method: "POST",
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({
+        message,
+        clientMessageId: input.clientMessageId,
+        displayMessage: input.displayMessage ?? message,
+      }),
     });
+  },
+
+  async getJob(jobId: string): Promise<JobStatusResponse> {
+    if (!live) {
+      return {
+        jobId,
+        threadId: "demo-thread",
+        messageId: `demo-message-${Date.now()}`,
+        status: "codex_response_completed",
+        adapter: "demo",
+        attempts: 1,
+        createdAt: new Date().toISOString(),
+        startedAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        lastEventAt: new Date().toISOString(),
+        error: null,
+      };
+    }
+
+    return fetchLive<JobStatusResponse>(`/api/jobs/${jobId}`);
+  },
+
+  subscribeJobEvents(
+    jobId: string,
+    handlers: {
+      onStatus: (event: JobStatusEvent) => void;
+      onError?: (errorCode: DeliveryErrorCode, message: string) => void;
+    },
+  ) {
+    if (!live || typeof window === "undefined" || typeof EventSource === "undefined") {
+      return null;
+    }
+
+    const baseUrl = process.env.NEXT_PUBLIC_GATEWAY_URL;
+    if (!baseUrl) {
+      return null;
+    }
+
+    const apiKey = getStoredGatewayApiKey();
+    const url = new URL(`/api/jobs/${encodeURIComponent(jobId)}/events`, baseUrl);
+    if (apiKey) {
+      url.searchParams.set("apiKey", apiKey);
+    }
+
+    const source = new EventSource(url.toString(), { withCredentials: true });
+    source.addEventListener("job.status", (event) => {
+      try {
+        const parsed = JSON.parse((event as MessageEvent).data) as JobStatusEvent;
+        handlers.onStatus(parsed);
+      } catch {
+        // Ignore malformed SSE payloads.
+      }
+    });
+
+    source.addEventListener("error", () => {
+      handlers.onError?.("timeout", "Falha na stream de eventos do job.");
+    });
+
+    return {
+      close() {
+        source.close();
+      },
+    };
   },
 
   async pauseThread(threadId: string): Promise<{ ok: boolean; status?: string }> {

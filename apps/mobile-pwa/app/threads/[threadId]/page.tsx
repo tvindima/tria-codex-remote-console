@@ -38,7 +38,13 @@ import { ActionButton } from "@/components/vistaulux/action-button";
 import { StatusPill } from "@/components/vistaulux/status-pill";
 import { api } from "@/lib/api";
 import { mockTerminalLines } from "@/lib/mock-data";
-import { ThreadMessage, ThreadSummary } from "@/lib/types";
+import {
+  DeliveryErrorCode,
+  JobStatusEvent,
+  MessageLifecycleStatus,
+  ThreadMessage,
+  ThreadSummary,
+} from "@/lib/types";
 import { createDemoStream } from "@/lib/websocket";
 
 type AgentOption = {
@@ -94,6 +100,28 @@ const ACCESS_LABELS: Record<AccessKey, string> = {
 };
 
 const URL_PATTERN = /(https?:\/\/[^\s]+)/g;
+const TERMINAL_JOB_STATES = new Set<MessageLifecycleStatus>([
+  "codex_response_completed",
+  "failed",
+]);
+const GATEWAY_CONFIRMED_STATES = new Set<MessageLifecycleStatus>([
+  "acknowledged_by_gateway",
+  "queued_for_codex",
+  "delivered_to_codex",
+  "codex_running",
+  "codex_response_started",
+  "codex_response_completed",
+]);
+const CODEX_CONFIRMED_STATES = new Set<MessageLifecycleStatus>([
+  "delivered_to_codex",
+  "codex_running",
+  "codex_response_started",
+  "codex_response_completed",
+]);
+const RUNNING_STATES = new Set<MessageLifecycleStatus>([
+  "codex_running",
+  "codex_response_started",
+]);
 
 function sanitizeThreadMessages(items: ThreadMessage[]) {
   const result: ThreadMessage[] = [];
@@ -137,6 +165,56 @@ function sanitizeThreadMessages(items: ThreadMessage[]) {
   return result;
 }
 
+function normalizeDeliveryError(code: DeliveryErrorCode | null | undefined, fallback?: string | null) {
+  const fallbackMessage = (fallback ?? "").trim();
+  if (!code) {
+    return fallbackMessage || "Falha ao entregar ao Codex local.";
+  }
+
+  const mapped: Record<DeliveryErrorCode, string> = {
+    codex_not_found: "Falha ao entregar ao Codex local (codex_not_found).",
+    codex_resume_failed: "Falha ao entregar ao Codex local (codex_resume_failed).",
+    pty_not_available: "Falha ao entregar ao Codex local (pty_not_available).",
+    thread_mapping_missing: "Thread não ligada ao Codex real (thread_mapping_missing).",
+    timeout: "Falha ao entregar ao Codex local (timeout).",
+    approval_required: "Approval obrigatório antes de executar (approval_required).",
+    process_exited: "Falha ao entregar ao Codex local (process_exited).",
+  };
+
+  return fallbackMessage || mapped[code];
+}
+
+function statusText(status: MessageLifecycleStatus) {
+  const label: Record<MessageLifecycleStatus, string> = {
+    created_local: "A enviar...",
+    sent_to_gateway: "A enviar...",
+    acknowledged_by_gateway: "Entregue ao gateway",
+    queued_for_codex: "Na fila do Codex",
+    delivered_to_codex: "Entregue ao Codex",
+    codex_running: "Codex a executar",
+    codex_response_started: "Resposta iniciada",
+    codex_response_completed: "Resposta recebida",
+    failed: "Falhou",
+  };
+  return label[status];
+}
+
+function formatTimestampLabel(timestamp: string) {
+  const parsed = new Date(timestamp);
+  if (Number.isNaN(parsed.getTime())) {
+    return timestamp;
+  }
+
+  return parsed.toLocaleString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+}
+
 export default function ThreadDetailPage() {
   const params = useParams<{ threadId: string }>();
   const router = useRouter();
@@ -144,9 +222,12 @@ export default function ThreadDetailPage() {
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const historyRefreshingRef = useRef(false);
-  const liveSyncLoopRef = useRef<number | null>(null);
-  const serverHistoryCountRef = useRef(0);
-  const optimisticReplyRef = useRef<{ baselineServerCount: number } | null>(null);
+  const refreshHistoryRef = useRef<((options?: { silent?: boolean }) => Promise<unknown>) | null>(
+    null,
+  );
+  const trackedJobsRef = useRef<Map<string, string>>(new Map());
+  const jobEventStreamsRef = useRef<Map<string, { close: () => void }>>(new Map());
+  const jobFallbackPollersRef = useRef<Map<string, number>>(new Map());
 
   const [thread, setThread] = useState<ThreadSummary | undefined>(undefined);
   const [threadList, setThreadList] = useState<ThreadSummary[]>([]);
@@ -180,6 +261,8 @@ export default function ThreadDetailPage() {
 
   const headerTitle = useMemo(() => thread?.title ?? "Thread", [thread]);
   const subtitle = useMemo(() => thread?.project ?? "Local Codex thread", [thread]);
+  const threadMappedToLiveCodex =
+    api.mode !== "live" || Boolean(thread && thread.sourceKind !== "demo");
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
     const node = messagesScrollRef.current;
     if (!node) {
@@ -232,12 +315,76 @@ export default function ThreadDetailPage() {
     window.localStorage.setItem(ACCESS_STORAGE_KEY, JSON.stringify(accessPrefs));
   }, [accessPrefs]);
 
-  const stopLiveSyncLoop = useCallback(() => {
-    if (liveSyncLoopRef.current) {
-      window.clearInterval(liveSyncLoopRef.current);
-      liveSyncLoopRef.current = null;
+  const closeJobStream = useCallback((jobId: string) => {
+    const stream = jobEventStreamsRef.current.get(jobId);
+    if (!stream) {
+      return;
     }
+    stream.close();
+    jobEventStreamsRef.current.delete(jobId);
   }, []);
+
+  const stopJobPolling = useCallback((jobId: string) => {
+    const timer = jobFallbackPollersRef.current.get(jobId);
+    if (!timer) {
+      return;
+    }
+    window.clearInterval(timer);
+    jobFallbackPollersRef.current.delete(jobId);
+  }, []);
+
+  const updateMessageDeliveryByServerId = useCallback(
+    (
+      serverMessageId: string,
+      patch: Partial<NonNullable<ThreadMessage["delivery"]>>,
+      preserveContent?: string,
+    ) => {
+      setMessages((previous) =>
+        previous.map((message) => {
+          const delivery = message.delivery ?? null;
+          if (!delivery || delivery.serverMessageId !== serverMessageId) {
+            return message;
+          }
+
+          return {
+            ...message,
+            content: preserveContent !== undefined ? preserveContent : message.content,
+            delivery: {
+              ...delivery,
+              ...patch,
+            },
+          };
+        }),
+      );
+    },
+    [],
+  );
+
+  const applyJobEvent = useCallback(
+    (event: JobStatusEvent) => {
+      trackedJobsRef.current.set(event.serverMessageId, event.jobId);
+      updateMessageDeliveryByServerId(event.serverMessageId, {
+        jobId: event.jobId,
+        status: event.status,
+        errorCode: event.errorCode,
+        errorMessage: event.errorMessage,
+      });
+
+      if (event.status === "failed") {
+        setToastMessage(normalizeDeliveryError(event.errorCode, event.errorMessage));
+      }
+
+      if (event.status === "codex_response_completed") {
+        void refreshHistoryRef.current?.({ silent: true });
+      }
+
+      if (TERMINAL_JOB_STATES.has(event.status)) {
+        closeJobStream(event.jobId);
+        stopJobPolling(event.jobId);
+      }
+    },
+    [closeJobStream, stopJobPolling, updateMessageDeliveryByServerId],
+  );
 
   const refreshHistory = useCallback(
     async (options?: { silent?: boolean }) => {
@@ -257,28 +404,10 @@ export default function ThreadDetailPage() {
           api.getThreads(),
         ]);
 
-        let messageCount: number | null = null;
-
         if (messagesResult.status === "fulfilled") {
           const serverMessages = sanitizeThreadMessages(messagesResult.value);
-          const serverCount = serverMessages.length;
-          const optimistic = optimisticReplyRef.current;
-          const needsServerAssistant = optimistic
-            ? serverCount < optimistic.baselineServerCount + 2
-            : false;
-
-          if (!needsServerAssistant) {
-            setMessages(serverMessages);
-            if (optimistic) {
-              optimisticReplyRef.current = null;
-            }
-            setHistoryCount(serverCount);
-          } else {
-            setHistoryCount((previous) => Math.max(previous, serverCount + 1));
-          }
-
-          serverHistoryCountRef.current = messagesResult.value.length;
-          messageCount = serverCount;
+          setMessages(serverMessages);
+          setHistoryCount(serverMessages.length);
         }
 
         if (threadsResult.status === "fulfilled") {
@@ -292,7 +421,7 @@ export default function ThreadDetailPage() {
           setToastMessage("Histórico atualizado.");
         }
 
-        return messageCount;
+        return true;
       } finally {
         historyRefreshingRef.current = false;
         if (!silent) {
@@ -301,6 +430,79 @@ export default function ThreadDetailPage() {
       }
     },
     [params.threadId],
+  );
+
+  useEffect(() => {
+    refreshHistoryRef.current = refreshHistory;
+  }, [refreshHistory]);
+
+  const startJobTracking = useCallback(
+    async (jobId: string, serverMessageId: string) => {
+      const tracked = trackedJobsRef.current.get(serverMessageId);
+      if (
+        tracked === jobId &&
+        (jobEventStreamsRef.current.has(jobId) || jobFallbackPollersRef.current.has(jobId))
+      ) {
+        return;
+      }
+
+      const pollOnce = async () => {
+        try {
+          const job = await api.getJob(jobId);
+          applyJobEvent({
+            id: Date.now(),
+            jobId: job.jobId,
+            threadId: job.threadId,
+            serverMessageId: job.messageId,
+            status: job.status,
+            errorCode: job.error?.code ?? null,
+            errorMessage: job.error?.message ?? null,
+            payload: null,
+            createdAt: job.lastEventAt ?? new Date().toISOString(),
+          });
+          return job.status;
+        } catch {
+          return null;
+        }
+      };
+
+      const initialStatus = await pollOnce();
+      if (initialStatus && TERMINAL_JOB_STATES.has(initialStatus)) {
+        return;
+      }
+
+      const stream = api.subscribeJobEvents(jobId, {
+        onStatus: applyJobEvent,
+        onError: () => {
+          if (jobFallbackPollersRef.current.has(jobId)) {
+            return;
+          }
+
+          const timer = window.setInterval(async () => {
+            const status = await pollOnce();
+            if (status && TERMINAL_JOB_STATES.has(status)) {
+              stopJobPolling(jobId);
+            }
+          }, 3000);
+          jobFallbackPollersRef.current.set(jobId, timer);
+        },
+      });
+
+      if (stream) {
+        jobEventStreamsRef.current.set(jobId, stream);
+      } else if (!jobFallbackPollersRef.current.has(jobId)) {
+        const timer = window.setInterval(async () => {
+          const status = await pollOnce();
+          if (status && TERMINAL_JOB_STATES.has(status)) {
+            stopJobPolling(jobId);
+          }
+        }, 3000);
+        jobFallbackPollersRef.current.set(jobId, timer);
+      }
+
+      trackedJobsRef.current.set(serverMessageId, jobId);
+    },
+    [applyJobEvent, stopJobPolling],
   );
 
   const loadThreadContext = useCallback(async () => {
@@ -330,8 +532,27 @@ export default function ThreadDetailPage() {
         const serverMessages = sanitizeThreadMessages(messagesResult.value);
         setMessages(serverMessages);
         setHistoryCount(serverMessages.length);
-        serverHistoryCountRef.current = serverMessages.length;
-        optimisticReplyRef.current = null;
+
+        for (const message of serverMessages) {
+          const delivery = message.delivery;
+          if (!delivery?.jobId) {
+            continue;
+          }
+
+          if (TERMINAL_JOB_STATES.has(delivery.status)) {
+            continue;
+          }
+
+          if (jobEventStreamsRef.current.has(delivery.jobId)) {
+            continue;
+          }
+
+          if (jobFallbackPollersRef.current.has(delivery.jobId)) {
+            continue;
+          }
+
+          void startJobTracking(delivery.jobId, delivery.serverMessageId);
+        }
       } else {
         setToastMessage("Falha ao carregar histórico desta thread.");
       }
@@ -356,7 +577,7 @@ export default function ThreadDetailPage() {
     } finally {
       setLoadingHistory(false);
     }
-  }, [params.threadId]);
+  }, [params.threadId, startJobTracking]);
 
   useEffect(() => {
     void loadThreadContext();
@@ -371,23 +592,17 @@ export default function ThreadDetailPage() {
     return () => {
       clearInterval(timer);
       cancelStreamRef.current?.();
-      stopLiveSyncLoop();
+      for (const stream of jobEventStreamsRef.current.values()) {
+        stream.close();
+      }
+      for (const poller of jobFallbackPollersRef.current.values()) {
+        window.clearInterval(poller);
+      }
+      jobEventStreamsRef.current.clear();
+      jobFallbackPollersRef.current.clear();
+      trackedJobsRef.current.clear();
     };
-  }, [loadThreadContext, stopLiveSyncLoop]);
-
-  useEffect(() => {
-    if (api.mode !== "live") {
-      return;
-    }
-
-    const timer = window.setInterval(() => {
-      void refreshHistory({ silent: true });
-    }, 6000);
-
-    return () => {
-      window.clearInterval(timer);
-    };
-  }, [refreshHistory]);
+  }, [loadThreadContext]);
 
   useEffect(() => {
     const node = messagesScrollRef.current;
@@ -475,7 +690,16 @@ export default function ThreadDetailPage() {
       return;
     }
 
-    const baselineServerCount = serverHistoryCountRef.current;
+    if (api.mode === "live" && (!thread || thread.sourceKind === "demo")) {
+      setToastMessage("Thread não ligada ao Codex real.");
+      return;
+    }
+
+    const clientMessageId =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `client-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
     const attachmentLines = pendingFiles.map((file) => {
       const kb = Math.max(1, Math.round(file.size / 1024));
       return `- ${file.name} (${file.type || "file"}, ${kb} KB)`;
@@ -486,15 +710,20 @@ export default function ThreadDetailPage() {
     const outgoingMessage = `${message}${attachmentsPrompt}`.trim();
 
     const userMessage: ThreadMessage = {
-      id: `${Date.now()}-user`,
+      id: `local-${clientMessageId}`,
       role: "user",
       content:
         message ||
         `Anexos enviados:\n${attachmentLines.map((line) => line.replace(/^- /, "• ")).join("\n")}`,
-      timestamp: new Date().toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-      }),
+      timestamp: new Date().toISOString(),
+      delivery: {
+        clientMessageId,
+        serverMessageId: `local-${clientMessageId}`,
+        jobId: null,
+        status: "created_local",
+        errorCode: null,
+        errorMessage: null,
+      },
     };
 
     setMessages((previous) => [...previous, userMessage]);
@@ -505,20 +734,35 @@ export default function ThreadDetailPage() {
 
     setIsSending(true);
     try {
-      let result:
-        | {
-            ok: boolean;
-            threadId?: string;
-            message?: string;
-            assistantReply?: string;
-            requiresApproval?: boolean;
-            error?: string;
-          }
-        | null = null;
+      let result = null;
 
       try {
-        result = await api.sendMessage(params.threadId, buildPrompt(outgoingMessage));
+        result = await api.sendMessage(params.threadId, buildPrompt(outgoingMessage), {
+          clientMessageId,
+          displayMessage:
+            message ||
+            `Anexos enviados:\n${attachmentLines
+              .map((line) => line.replace(/^- /, "• "))
+              .join("\n")}`,
+        });
       } catch (error) {
+        setMessages((previous) =>
+          previous.map((item) =>
+            item.delivery?.clientMessageId === clientMessageId
+              ? {
+                  ...item,
+                  delivery: item.delivery
+                    ? {
+                        ...item.delivery,
+                        status: "failed",
+                        errorCode: "codex_resume_failed",
+                        errorMessage: "Falha ao comunicar com o gateway.",
+                      }
+                    : item.delivery,
+                }
+              : item,
+          ),
+        );
         setToastMessage(
           error instanceof Error && error.message
             ? error.message
@@ -528,19 +772,108 @@ export default function ThreadDetailPage() {
       }
 
       if (!result) {
+        setMessages((previous) =>
+          previous.map((item) =>
+            item.delivery?.clientMessageId === clientMessageId
+              ? {
+                  ...item,
+                  delivery: item.delivery
+                    ? {
+                        ...item.delivery,
+                        status: "failed",
+                        errorCode: "codex_resume_failed",
+                        errorMessage: "Falha ao comunicar com o gateway.",
+                      }
+                    : item.delivery,
+                }
+              : item,
+          ),
+        );
         setToastMessage("Falha ao enviar mensagem para o gateway.");
         return;
       }
 
       if (!result.ok) {
+        setMessages((previous) =>
+          previous.map((item) =>
+            item.delivery?.clientMessageId === clientMessageId
+              ? {
+                  ...item,
+                  id: result.messageId || item.id,
+                  delivery: item.delivery
+                    ? {
+                        ...item.delivery,
+                        serverMessageId: result.messageId || item.delivery.serverMessageId,
+                        jobId: result.jobId ?? null,
+                        status: result.status || "failed",
+                        errorCode: result.errorCode ?? "codex_resume_failed",
+                        errorMessage:
+                          result.errorMessage ??
+                          result.error ??
+                          "Falha ao entregar ao Codex local.",
+                      }
+                    : item.delivery,
+                }
+              : item,
+          ),
+        );
+
         if (result.requiresApproval) {
           setState("approval");
-          setToastMessage("Command blocked. Approval required.");
+          setToastMessage("Approval obrigatório para continuar.");
         } else {
-          setToastMessage(result.error ?? "Failed to send message.");
+          setToastMessage(
+            normalizeDeliveryError(result.errorCode ?? "codex_resume_failed", result.errorMessage),
+          );
         }
         return;
       }
+
+      if (api.mode === "live") {
+        setMessages((previous) =>
+          previous.map((item) =>
+            item.delivery?.clientMessageId === clientMessageId
+              ? {
+                  ...item,
+                  id: result.messageId,
+                  delivery: item.delivery
+                    ? {
+                        ...item.delivery,
+                        serverMessageId: result.messageId,
+                        jobId: result.jobId,
+                        status: result.status,
+                        errorCode: null,
+                        errorMessage: null,
+                      }
+                    : item.delivery,
+                }
+              : item,
+          ),
+        );
+        await startJobTracking(result.jobId, result.messageId);
+        return;
+      }
+
+      setMessages((previous) =>
+        previous.map((item) =>
+          item.delivery?.clientMessageId === clientMessageId
+            ? {
+                ...item,
+                id: result.messageId,
+                delivery: item.delivery
+                  ? {
+                      ...item.delivery,
+                      serverMessageId: result.messageId,
+                      jobId: result.jobId,
+                      status: "codex_response_completed",
+                      errorCode: null,
+                      errorMessage: null,
+                    }
+                  : item.delivery,
+              }
+            : item,
+        ),
+      );
 
       const assistantId = `${Date.now()}-assistant`;
       setMessages((previous) => [
@@ -549,54 +882,12 @@ export default function ThreadDetailPage() {
           id: assistantId,
           role: "assistant",
           content: "",
-          timestamp: new Date().toLocaleTimeString([], {
-            hour: "2-digit",
-            minute: "2-digit",
-          }),
+          timestamp: new Date().toISOString(),
+          delivery: null,
         },
       ]);
       setHistoryCount((previous) => previous + 1);
       setAtBottom(true);
-
-      if (api.mode === "live") {
-        optimisticReplyRef.current = { baselineServerCount };
-        setMessages((previous) =>
-          previous.map((item) =>
-            item.id === assistantId
-              ? {
-                  ...item,
-                  content: result.assistantReply || "Mensagem entregue ao Codex local.",
-                }
-              : item,
-          ),
-        );
-
-        stopLiveSyncLoop();
-        let tick = 0;
-        const maxTicks = 32;
-        const syncStep = async () => {
-          tick += 1;
-          const count = await refreshHistory({ silent: true });
-          if (count === null) {
-            return;
-          }
-
-          const hasAnyServerUpdate = count > baselineServerCount;
-          const hasServerReply = count >= baselineServerCount + 2;
-          if (hasServerReply || tick >= maxTicks) {
-            stopLiveSyncLoop();
-            if (!hasAnyServerUpdate) {
-              setToastMessage("Mensagem enviada. A aguardar resposta do Codex local.");
-            }
-          }
-        };
-
-        void syncStep();
-        liveSyncLoopRef.current = window.setInterval(() => {
-          void syncStep();
-        }, 3000);
-        return;
-      }
 
       cancelStreamRef.current?.();
       cancelStreamRef.current = createDemoStream(message, (eventData) => {
@@ -646,6 +937,52 @@ export default function ThreadDetailPage() {
 
     setState("running");
     setToastMessage("Thread resumed.");
+  };
+
+  const renderDeliveryState = (delivery: NonNullable<ThreadMessage["delivery"]>) => {
+    const gatewayDone = GATEWAY_CONFIRMED_STATES.has(delivery.status);
+    const codexDone = CODEX_CONFIRMED_STATES.has(delivery.status);
+    const running = RUNNING_STATES.has(delivery.status);
+    const failed = delivery.status === "failed";
+    const statusLabel = statusText(delivery.status);
+    const failedText = normalizeDeliveryError(delivery.errorCode, delivery.errorMessage);
+
+    return (
+      <div className="mt-2 space-y-1">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span
+            className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${
+              gatewayDone
+                ? "border-emerald-400/45 bg-emerald-500/18 text-emerald-100"
+                : "border-white/14 bg-white/8 text-slate-300"
+            }`}
+          >
+            Gateway {gatewayDone ? "✓" : "…"}
+          </span>
+          <span
+            className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${
+              codexDone
+                ? "border-emerald-400/45 bg-emerald-500/18 text-emerald-100"
+                : "border-white/14 bg-white/8 text-slate-300"
+            }`}
+          >
+            Codex {codexDone ? "✓" : "…"}
+          </span>
+          <span
+            className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${
+              failed
+                ? "border-rose-400/50 bg-rose-500/18 text-rose-100"
+                : running
+                  ? "border-blue-400/45 bg-blue-500/18 text-blue-100"
+                  : "border-white/14 bg-white/8 text-slate-300"
+            }`}
+          >
+            {failed ? "Failed" : running ? "Running" : statusLabel}
+          </span>
+        </div>
+        {failed ? <p className="text-[10px] text-rose-200">{failedText}</p> : null}
+      </div>
+    );
   };
 
   const renderMessageContent = (content: string) => {
@@ -784,7 +1121,12 @@ export default function ThreadDetailPage() {
               <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
                 {renderMessageContent(message.content || "...")}
               </p>
-              <p className="mt-1.5 text-[10px] text-slate-400">{message.timestamp}</p>
+              {message.role === "user" && message.delivery
+                ? renderDeliveryState(message.delivery)
+                : null}
+              <p className="mt-1.5 text-[10px] text-slate-400">
+                {formatTimestampLabel(message.timestamp)}
+              </p>
             </div>
           ))}
         </div>
@@ -846,6 +1188,12 @@ export default function ThreadDetailPage() {
             </div>
           ) : null}
 
+          {!threadMappedToLiveCodex ? (
+            <div className="mb-2 rounded-xl border border-rose-400/35 bg-rose-500/12 px-3 py-2 text-xs text-rose-100">
+              Thread não ligada ao Codex real.
+            </div>
+          ) : null}
+
           <form onSubmit={submitMessage} className="flex items-end gap-2 md:gap-3">
             <input
               ref={fileInputRef}
@@ -857,7 +1205,7 @@ export default function ThreadDetailPage() {
             />
             <ActionButton
               type="button"
-              disabled={isSending}
+              disabled={isSending || !threadMappedToLiveCodex}
               onClick={() => fileInputRef.current?.click()}
               className="min-h-[52px] min-w-[52px] px-0"
             >
@@ -867,14 +1215,14 @@ export default function ThreadDetailPage() {
               value={input}
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={handleComposerKeyDown}
-              disabled={isSending}
+              disabled={isSending || !threadMappedToLiveCodex}
               placeholder="Escrever instrução... (Enter envia, Shift+Enter nova linha)"
               className="min-h-[52px] max-h-[130px] rounded-[20px] border-white/16 bg-white/8 px-4 py-3 text-[16px] text-slate-100 placeholder:text-slate-400"
             />
             <ActionButton
               type="submit"
               tone="primary"
-              disabled={isSending}
+              disabled={isSending || !threadMappedToLiveCodex}
               className="min-h-[52px] min-w-[52px] px-0 md:min-w-[60px]"
             >
               <Send className="mx-auto h-4 w-4" />

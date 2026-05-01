@@ -8,6 +8,7 @@ import { registerApprovalsRoutes } from "./routes/approvals.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerDiffsRoutes } from "./routes/diffs.js";
 import { registerHealthRoutes } from "./routes/health.js";
+import { registerJobsRoutes } from "./routes/jobs.js";
 import { registerLogsRoutes } from "./routes/logs.js";
 import { registerPairingRoutes } from "./routes/pairing.js";
 import { registerProjectsRoutes } from "./routes/projects.js";
@@ -21,6 +22,7 @@ import { ApprovalService } from "./services/approval-service.js";
 import { AuditService } from "./services/audit-service.js";
 import { CodexStateService } from "./services/codex-state-service.js";
 import { GitService } from "./services/git-service.js";
+import { MessageJobService } from "./services/message-job-service.js";
 import { RuntimeService } from "./services/runtime-service.js";
 import { registerThreadSocket } from "./websocket/thread-socket.js";
 
@@ -37,10 +39,21 @@ export async function buildServer() {
     auditService,
     approvalService,
   );
+  const messageJobService = new MessageJobService(
+    runtimeService,
+    approvalService,
+    auditService,
+  );
+  await messageJobService.start();
 
   app.decorate("runtimeService", runtimeService);
   app.decorate("approvalService", approvalService);
   app.decorate("auditService", auditService);
+  app.decorate("messageJobService", messageJobService);
+
+  app.addHook("onClose", async () => {
+    await messageJobService.stop();
+  });
 
   await app.register(cors, { origin: true, credentials: true });
   await app.register(websocket);
@@ -70,7 +83,9 @@ export async function buildServer() {
       return;
     }
 
-    const provided = extractApiKeyFromHeaders(request.headers as Record<string, unknown>);
+    const queryApiKey = new URLSearchParams(request.url.split("?")[1] ?? "").get("apiKey") ?? "";
+    const provided =
+      extractApiKeyFromHeaders(request.headers as Record<string, unknown>) || queryApiKey;
     const valid = validateGatewayApiKey(provided, gatewayApiKey);
 
     if (!valid) {
@@ -85,6 +100,7 @@ export async function buildServer() {
   await registerHealthRoutes(app);
   await registerAuthRoutes(app);
   await registerPairingRoutes(app);
+  await registerJobsRoutes(app);
   await registerProjectsRoutes(app);
   await registerThreadsRoutes(app);
   await registerApprovalsRoutes(app);
