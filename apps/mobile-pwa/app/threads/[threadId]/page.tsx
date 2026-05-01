@@ -116,6 +116,7 @@ export default function ThreadDetailPage() {
   const [tunnelLabel, setTunnelLabel] = useState("unknown");
   const [historyCount, setHistoryCount] = useState(0);
   const [loadingHistory, setLoadingHistory] = useState(false);
+  const [atBottom, setAtBottom] = useState(true);
 
   const selectedAgent = useMemo(
     () => AGENTS.find((agent) => agent.id === selectedAgentId) ?? AGENTS[0],
@@ -124,6 +125,17 @@ export default function ThreadDetailPage() {
 
   const headerTitle = useMemo(() => thread?.title ?? "Thread", [thread]);
   const subtitle = useMemo(() => thread?.project ?? "Local Codex thread", [thread]);
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
+    const node = messagesScrollRef.current;
+    if (!node) {
+      return;
+    }
+
+    node.scrollTo({
+      top: node.scrollHeight,
+      behavior,
+    });
+  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -168,26 +180,50 @@ export default function ThreadDetailPage() {
   const loadThreadContext = useCallback(async () => {
     setLoadingHistory(true);
     try {
-      const [currentThread, initialMessages, threads, health] = await Promise.all([
+      const [threadResult, messagesResult, threadsResult, healthResult] = await Promise.allSettled([
         api.getThread(params.threadId),
         api.getMessages(params.threadId, { full: true, limit: 2000 }),
         api.getThreads(),
         api.health(),
       ]);
 
-      if (currentThread) {
-        setThread(currentThread);
-        setState(currentThread.state);
-        const project = await api.getProject(currentThread.projectId);
-        setBranch(project?.branch ?? "local");
+      let resolvedThread: ThreadSummary | undefined = undefined;
+
+      if (threadResult.status === "fulfilled" && threadResult.value) {
+        resolvedThread = threadResult.value;
+        setThread(threadResult.value);
+        setState(threadResult.value.state);
+
+        const projectResult = await api
+          .getProject(threadResult.value.projectId)
+          .catch(() => undefined);
+        setBranch(projectResult?.branch ?? "local");
       }
 
-      setMessages(initialMessages);
-      setHistoryCount(initialMessages.length);
-      setThreadList(threads);
-      setConnectionStatus(health.connectionState.toLowerCase());
-      setAdapterLabel(health.codex.adapter);
-      setTunnelLabel(health.tunnel.provider ?? health.tunnel.mode ?? "unknown");
+      if (messagesResult.status === "fulfilled") {
+        setMessages(messagesResult.value);
+        setHistoryCount(messagesResult.value.length);
+      } else {
+        setToastMessage("Falha ao carregar histórico desta thread.");
+      }
+
+      if (threadsResult.status === "fulfilled") {
+        const nextThreads = threadsResult.value;
+        if (nextThreads.length > 0) {
+          setThreadList(nextThreads);
+        } else if (resolvedThread) {
+          setThreadList([resolvedThread]);
+        }
+      } else if (resolvedThread) {
+        setThreadList([resolvedThread]);
+      }
+
+      if (healthResult.status === "fulfilled") {
+        const health = healthResult.value;
+        setConnectionStatus(health.connectionState.toLowerCase());
+        setAdapterLabel(health.codex.adapter);
+        setTunnelLabel(health.tunnel.provider ?? health.tunnel.mode ?? "unknown");
+      }
     } finally {
       setLoadingHistory(false);
     }
@@ -215,12 +251,31 @@ export default function ThreadDetailPage() {
       return;
     }
 
+    const onScroll = () => {
+      const threshold = 48;
+      const distance = node.scrollHeight - node.scrollTop - node.clientHeight;
+      setAtBottom(distance <= threshold);
+    };
+
+    onScroll();
+    node.addEventListener("scroll", onScroll, { passive: true });
+
+    return () => {
+      node.removeEventListener("scroll", onScroll);
+    };
+  }, [params.threadId]);
+
+  useEffect(() => {
+    if (!atBottom) {
+      return;
+    }
+
     const frame = requestAnimationFrame(() => {
-      node.scrollTop = node.scrollHeight;
+      scrollToBottom("auto");
     });
 
     return () => cancelAnimationFrame(frame);
-  }, [messages.length, params.threadId]);
+  }, [atBottom, messages.length, params.threadId, scrollToBottom]);
 
   useEffect(() => {
     if (!toastMessage) {
@@ -285,6 +340,7 @@ export default function ThreadDetailPage() {
     setMessages((previous) => [...previous, userMessage]);
     setHistoryCount((previous) => previous + 1);
     setInput("");
+    setAtBottom(true);
 
     let result:
       | {
@@ -324,10 +380,10 @@ export default function ThreadDetailPage() {
     }
 
     const assistantId = `${Date.now()}-assistant`;
-      setMessages((previous) => [
-        ...previous,
-        {
-          id: assistantId,
+    setMessages((previous) => [
+      ...previous,
+      {
+        id: assistantId,
         role: "assistant",
         content: "",
         timestamp: new Date().toLocaleTimeString([], {
@@ -335,18 +391,17 @@ export default function ThreadDetailPage() {
           minute: "2-digit",
         }),
       },
-      ]);
-      setHistoryCount((previous) => previous + 1);
+    ]);
+    setHistoryCount((previous) => previous + 1);
+    setAtBottom(true);
 
     if (api.mode === "live") {
-        setMessages((previous) =>
+      setMessages((previous) =>
         previous.map((item) =>
           item.id === assistantId
             ? {
                 ...item,
-                content:
-                  result.assistantReply ||
-                  "Mensagem entregue ao Codex local.",
+                content: result.assistantReply || "Mensagem entregue ao Codex local.",
               }
             : item,
         ),
@@ -384,9 +439,23 @@ export default function ThreadDetailPage() {
   const refreshHistory = async () => {
     setLoadingHistory(true);
     try {
-      const items = await api.getMessages(params.threadId, { full: true, limit: 2000 });
-      setMessages(items);
-      setHistoryCount(items.length);
+      const [messagesResult, threadsResult] = await Promise.allSettled([
+        api.getMessages(params.threadId, { full: true, limit: 2000 }),
+        api.getThreads(),
+      ]);
+
+      if (messagesResult.status === "fulfilled") {
+        setMessages(messagesResult.value);
+        setHistoryCount(messagesResult.value.length);
+      }
+
+      if (threadsResult.status === "fulfilled") {
+        const nextThreads = threadsResult.value;
+        if (nextThreads.length > 0) {
+          setThreadList(nextThreads);
+        }
+      }
+
       setToastMessage("Histórico atualizado.");
     } finally {
       setLoadingHistory(false);
@@ -409,7 +478,7 @@ export default function ThreadDetailPage() {
     <MobileFrame>
       <Toast open={Boolean(toastMessage)} message={toastMessage} tone="info" />
 
-      <div className="relative flex min-h-[calc(100vh-9.5rem)] flex-col">
+      <div className="relative flex min-h-[calc(100vh-9.5rem)] min-w-0 flex-col overflow-x-hidden">
         <header className="flex items-center justify-between gap-3 pb-3">
           <button
             type="button"
@@ -467,13 +536,17 @@ export default function ThreadDetailPage() {
         </header>
 
         <div className="mb-2 px-1">
-          <p className="text-[24px] font-bold leading-tight text-slate-50">{headerTitle}</p>
-          <p className="mt-1 text-sm text-slate-300">{subtitle}</p>
+          <p className="text-[24px] font-bold leading-tight text-slate-50 break-words [overflow-wrap:anywhere]">
+            {headerTitle}
+          </p>
+          <p className="mt-1 text-sm text-slate-300 break-words [overflow-wrap:anywhere]">
+            {subtitle}
+          </p>
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <StatusPill status={connectionStatus} pulse={connectionStatus === "live_mode"} />
             <StatusPill status={state} pulse={state === "running"} />
           </div>
-          <p className="mt-1 text-xs text-slate-400">
+          <p className="mt-1 break-words text-xs text-slate-400 [overflow-wrap:anywhere]">
             Agent: {selectedAgent.label} · Adapter: {adapterLabel} · Tunnel: {tunnelLabel} ·
             Branch: {branch}
           </p>
@@ -490,7 +563,10 @@ export default function ThreadDetailPage() {
           </div>
         </div>
 
-        <div ref={messagesScrollRef} className="flex-1 space-y-3 overflow-y-auto pb-36 pr-1">
+        <div
+          ref={messagesScrollRef}
+          className="flex-1 space-y-3 overflow-x-hidden overflow-y-auto pb-36 pr-1"
+        >
           <CommandProgressCard
             command={api.mode === "live" ? "codex exec resume" : "npm run test:tenant"}
             status={state === "running" ? "Running" : "Paused"}
@@ -501,17 +577,33 @@ export default function ThreadDetailPage() {
           {messages.map((message) => (
             <div
               key={message.id}
-              className={`max-w-[94%] rounded-3xl border px-4 py-3 text-[15px] leading-relaxed ${
+              className={`w-fit max-w-[94%] overflow-hidden rounded-3xl border px-4 py-3 text-[15px] leading-relaxed ${
                 message.role === "user"
                   ? "ml-auto border-blue-400/45 bg-blue-500/18 text-blue-100"
                   : "mr-auto border-white/14 bg-white/8 text-slate-100"
               }`}
             >
-              <p className="whitespace-pre-wrap">{message.content || "..."}</p>
+              <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+                {message.content || "..."}
+              </p>
               <p className="mt-1.5 text-[10px] text-slate-400">{message.timestamp}</p>
             </div>
           ))}
         </div>
+
+        {!atBottom ? (
+          <button
+            type="button"
+            onClick={() => {
+              setAtBottom(true);
+              scrollToBottom("smooth");
+            }}
+            className="absolute bottom-[140px] right-3 z-20 inline-flex min-h-[44px] items-center gap-1.5 rounded-full border border-blue-400/40 bg-blue-500/22 px-3 py-2 text-xs font-semibold text-blue-100 shadow-[0_10px_30px_rgba(8,17,34,0.55)]"
+          >
+            <ChevronDown className="h-3.5 w-3.5" />
+            Ir para a última
+          </button>
+        ) : null}
 
         <div className="absolute inset-x-0 bottom-0 z-30 border-t border-white/12 bg-[#070c15]/95 px-2 pb-3 pt-2 backdrop-blur-xl">
           <div className="mb-2 grid grid-cols-3 gap-2">
@@ -565,26 +657,34 @@ export default function ThreadDetailPage() {
               </button>
             </div>
             <div className="space-y-2 overflow-y-auto pb-8">
-              {threadList.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => {
-                    setShowDrawer(false);
-                    router.push(`/threads/${item.id}`);
-                  }}
-                  className={`w-full rounded-2xl border px-3 py-3 text-left ${
-                    item.id === params.threadId
-                      ? "border-blue-400/45 bg-blue-500/14"
-                      : "border-white/12 bg-white/6"
-                  }`}
-                >
-                  <p className="line-clamp-2 text-sm font-semibold text-slate-100">{item.title}</p>
-                  <p className="mt-1 text-xs text-slate-400">
-                    {item.project} · {item.state} · {item.elapsed}
-                  </p>
-                </button>
-              ))}
+              {threadList.length ? (
+                threadList.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => {
+                      setShowDrawer(false);
+                      router.push(`/threads/${item.id}`);
+                    }}
+                    className={`w-full rounded-2xl border px-3 py-3 text-left ${
+                      item.id === params.threadId
+                        ? "border-blue-400/45 bg-blue-500/14"
+                        : "border-white/12 bg-white/6"
+                    }`}
+                  >
+                    <p className="line-clamp-2 break-words text-sm font-semibold text-slate-100">
+                      {item.title}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-400">
+                      {item.project} · {item.state} · {item.elapsed}
+                    </p>
+                  </button>
+                ))
+              ) : (
+                <div className="rounded-2xl border border-white/12 bg-white/6 px-3 py-3 text-xs text-slate-300">
+                  Lista de threads indisponível. Toque em “Atualizar histórico”.
+                </div>
+              )}
             </div>
           </aside>
         </div>

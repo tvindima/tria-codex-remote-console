@@ -71,13 +71,6 @@ function safeResolve(input: string | null | undefined) {
   return path.resolve(input);
 }
 
-function trimForTitle(input: string | null | undefined) {
-  return (input ?? "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 280);
-}
-
 function mapSourceKind(source: string) {
   if (source.includes("tmux")) {
     return "tmux_fallback" as const;
@@ -351,16 +344,16 @@ export class RuntimeService {
       projects.map((project) => [path.resolve(project.path), project]),
     );
     const approvals = this.approvalService.list();
-
-    return threads.map((thread) => {
+    const now = Date.now();
+    const normalized = threads.map((thread) => {
       const normalizedPath = (safeResolve(thread.cwd) ?? thread.cwd) || "unknown-project";
       const project = projectByPath.get(normalizedPath);
+      const projectId = project?.id ?? slug(normalizedPath);
+      const projectName = project?.name ?? (path.basename(normalizedPath) || "Project");
 
       const pendingApproval = approvals.find(
         (approval) => approval.status === "pending" && approval.threadId === thread.id,
       );
-
-      const now = Date.now();
       const isRecent = now - thread.updated_at * 1000 < 10 * 60 * 1000;
 
       let state: LiveThread["state"] = isRecent ? "running" : "idle";
@@ -369,19 +362,57 @@ export class RuntimeService {
       }
 
       return {
-        id: thread.id,
-        projectId: project?.id ?? slug(normalizedPath),
-        title:
-          trimForTitle(thread.title) ||
-          trimForTitle(thread.first_user_message) ||
-          "Untitled thread",
-        project: project?.name ?? path.basename(normalizedPath),
+        thread,
+        normalizedPath,
+        projectId,
+        projectName,
+        project,
         state,
-        elapsed: formatElapsed(thread.updated_at),
-        filesChanged: project?.diffs ?? 0,
-        risk: pendingApproval?.risk ?? "low",
-        sourceKind: mapSourceKind(thread.source),
-        cwd: normalizedPath,
+        pendingApproval,
+      };
+    });
+
+    // Title policy: always "PROJECT_NAME #NNN" instead of first message/body text.
+    const indexByThreadId = new Map<string, number>();
+    const grouped = new Map<string, typeof normalized>();
+    for (const item of normalized) {
+      const existing = grouped.get(item.projectId) ?? [];
+      existing.push(item);
+      grouped.set(item.projectId, existing);
+    }
+
+    for (const items of grouped.values()) {
+      items
+        .slice()
+        .sort((a, b) => {
+          if (a.thread.created_at !== b.thread.created_at) {
+            return a.thread.created_at - b.thread.created_at;
+          }
+          if (a.thread.updated_at !== b.thread.updated_at) {
+            return a.thread.updated_at - b.thread.updated_at;
+          }
+          return a.thread.id.localeCompare(b.thread.id);
+        })
+        .forEach((item, index) => {
+          indexByThreadId.set(item.thread.id, index + 1);
+        });
+    }
+
+    return normalized.map((item) => {
+      const sequence = indexByThreadId.get(item.thread.id) ?? 1;
+      const title = `${item.projectName} #${String(sequence).padStart(3, "0")}`;
+
+      return {
+        id: item.thread.id,
+        projectId: item.projectId,
+        title,
+        project: item.projectName,
+        state: item.state,
+        elapsed: formatElapsed(item.thread.updated_at),
+        filesChanged: item.project?.diffs ?? 0,
+        risk: item.pendingApproval?.risk ?? "low",
+        sourceKind: mapSourceKind(item.thread.source),
+        cwd: item.normalizedPath,
       };
     });
   }

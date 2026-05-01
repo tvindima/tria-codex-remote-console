@@ -59,14 +59,14 @@ export function AppShell({
     : api.mode === "live"
       ? api.hasGatewayApiKey()
         ? "Connecting to local gateway..."
-        : "Live mode requires pairing + local gateway access token."
+        : "Live mode requires device pairing."
       : "Sample data active";
 
   return (
     <MobileFrame>
-      <header className="mb-4 space-y-2 px-1">
+      <header className="mb-4 min-w-0 space-y-2 px-1">
         <div className="flex items-start justify-between gap-3">
-          <div>
+          <div className="min-w-0">
             <h1 className="text-[30px] font-bold leading-[1.04] text-slate-50">{title}</h1>
             {subtitle ? <p className="mt-1 text-sm text-slate-300">{subtitle}</p> : null}
             <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -78,13 +78,15 @@ export function AppShell({
                 {modeTag}
               </span>
             </div>
-            <p className="mt-1.5 text-[11px] text-slate-400">{metaInfo}</p>
+            <p className="mt-1.5 break-words text-[11px] text-slate-400 [overflow-wrap:anywhere]">
+              {metaInfo}
+            </p>
           </div>
           {meta}
         </div>
       </header>
 
-      <main className="flex-1 overflow-y-auto pb-32">{children}</main>
+      <main className="flex-1 min-w-0 overflow-x-hidden overflow-y-auto pb-32">{children}</main>
 
       {showNav ? <BottomNav /> : null}
     </MobileFrame>

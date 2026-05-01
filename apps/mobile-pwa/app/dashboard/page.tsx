@@ -16,19 +16,27 @@ import { StatusPill } from "@/components/vistaulux/status-pill";
 import { VistaCard } from "@/components/vistaulux/vista-card";
 import { api } from "@/lib/api";
 import { mockMacNode } from "@/lib/mock-data";
-import { ProjectSummary, ThreadSummary } from "@/lib/types";
+import { MacNode, ProjectSummary, ThreadSummary } from "@/lib/types";
 
 export default function DashboardPage() {
   const router = useRouter();
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
+  const [node, setNode] = useState<MacNode>(mockMacNode);
   const [confirmStopAll, setConfirmStopAll] = useState(false);
   const [showToast, setShowToast] = useState(false);
 
   useEffect(() => {
     const load = async () => {
-      setProjects(await api.getProjects());
-      setThreads(await api.getThreads());
+      const [projectsResult, threadsResult, health] = await Promise.all([
+        api.getProjects(),
+        api.getThreads(),
+        api.health(),
+      ]);
+
+      setProjects(projectsResult);
+      setThreads(threadsResult);
+      setNode(health.node);
     };
 
     load();
@@ -52,32 +60,39 @@ export default function DashboardPage() {
     <AppShell
       title="TRIA Codex Remote Console"
       subtitle="Cockpit for controlling local Codex threads running on your Mac."
-      meta={<MacStatusChip node={mockMacNode} />}
+      meta={<MacStatusChip node={node} />}
     >
-      <Toast open={showToast} message="All running threads were stopped (demo)." tone="danger" />
+      <Toast open={showToast} message="Stop request sent to all running threads." tone="danger" />
       <ScreenTransition>
         <div className="grid grid-cols-2 gap-2.5">
           <MetricCard label="Active Mac" value={1} icon={<Activity className="h-4 w-4" />} />
           <MetricCard label="Active Threads" value={threads.filter((thread) => thread.state === "running").length} />
-          <MetricCard label="Pending Approvals" value={threads.filter((thread) => thread.state === "approval").length} />
+          <MetricCard
+            label="Pending Approvals"
+            value={threads.filter((thread) => thread.state === "approval" || thread.state === "waiting_approval").length}
+          />
           <MetricCard label="Changed Files" value={changedFiles} />
         </div>
 
         <VistaCard>
           <h2 className="text-lg font-semibold text-slate-50">Operational Queue</h2>
           <div className="mt-3 space-y-2.5">
-            {threads.map((thread) => (
+            {threads.slice(0, 3).map((thread) => (
               <button
                 key={thread.id}
                 type="button"
                 onClick={() => router.push(`/threads/${thread.id}`)}
-                className="w-full rounded-2xl border border-white/10 bg-white/6 px-3 py-2.5 text-left transition hover:border-white/25"
+                className="w-full min-w-0 rounded-2xl border border-white/10 bg-white/6 px-3 py-2.5 text-left transition hover:border-white/25"
               >
                 <div className="flex items-center justify-between gap-2">
-                  <p className="text-sm font-semibold text-slate-100">{thread.project}</p>
+                  <p className="text-sm font-semibold text-slate-100 break-words [overflow-wrap:anywhere]">
+                    {thread.project}
+                  </p>
                   <StatusPill status={thread.state} pulse={thread.state === "running"} />
                 </div>
-                <p className="mt-1 text-xs text-slate-300">{thread.title}</p>
+                <p className="mt-1 text-xs text-slate-300 break-words [overflow-wrap:anywhere]">
+                  {thread.title}
+                </p>
                 <p className="mt-1 text-xs text-slate-400">build process — {thread.state === "running" ? "68%" : "-"}</p>
               </button>
             ))}
