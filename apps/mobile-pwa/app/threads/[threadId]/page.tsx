@@ -93,12 +93,17 @@ const ACCESS_LABELS: Record<AccessKey, string> = {
   deployProd: "Deploy production",
 };
 
+const URL_PATTERN = /(https?:\/\/[^\s]+)/g;
+
 export default function ThreadDetailPage() {
   const params = useParams<{ threadId: string }>();
   const router = useRouter();
   const cancelStreamRef = useRef<(() => void) | null>(null);
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const historyRefreshingRef = useRef(false);
+  const liveSyncLoopRef = useRef<number | null>(null);
+  const serverHistoryCountRef = useRef(0);
 
   const [thread, setThread] = useState<ThreadSummary | undefined>(undefined);
   const [threadList, setThreadList] = useState<ThreadSummary[]>([]);
@@ -123,6 +128,7 @@ export default function ThreadDetailPage() {
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [atBottom, setAtBottom] = useState(true);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [isSending, setIsSending] = useState(false);
 
   const selectedAgent = useMemo(
     () => AGENTS.find((agent) => agent.id === selectedAgentId) ?? AGENTS[0],
@@ -183,6 +189,62 @@ export default function ThreadDetailPage() {
     window.localStorage.setItem(ACCESS_STORAGE_KEY, JSON.stringify(accessPrefs));
   }, [accessPrefs]);
 
+  const stopLiveSyncLoop = useCallback(() => {
+    if (liveSyncLoopRef.current) {
+      window.clearInterval(liveSyncLoopRef.current);
+      liveSyncLoopRef.current = null;
+    }
+  }, []);
+
+  const refreshHistory = useCallback(
+    async (options?: { silent?: boolean }) => {
+      const silent = options?.silent ?? false;
+      if (historyRefreshingRef.current) {
+        return null;
+      }
+
+      historyRefreshingRef.current = true;
+      if (!silent) {
+        setLoadingHistory(true);
+      }
+
+      try {
+        const [messagesResult, threadsResult] = await Promise.allSettled([
+          api.getMessages(params.threadId, { full: true, limit: 2000 }),
+          api.getThreads(),
+        ]);
+
+        let messageCount: number | null = null;
+
+        if (messagesResult.status === "fulfilled") {
+          setMessages(messagesResult.value);
+          setHistoryCount(messagesResult.value.length);
+          serverHistoryCountRef.current = messagesResult.value.length;
+          messageCount = messagesResult.value.length;
+        }
+
+        if (threadsResult.status === "fulfilled") {
+          const nextThreads = threadsResult.value;
+          if (nextThreads.length > 0) {
+            setThreadList(nextThreads);
+          }
+        }
+
+        if (!silent) {
+          setToastMessage("Histórico atualizado.");
+        }
+
+        return messageCount;
+      } finally {
+        historyRefreshingRef.current = false;
+        if (!silent) {
+          setLoadingHistory(false);
+        }
+      }
+    },
+    [params.threadId],
+  );
+
   const loadThreadContext = useCallback(async () => {
     setLoadingHistory(true);
     try {
@@ -209,6 +271,7 @@ export default function ThreadDetailPage() {
       if (messagesResult.status === "fulfilled") {
         setMessages(messagesResult.value);
         setHistoryCount(messagesResult.value.length);
+        serverHistoryCountRef.current = messagesResult.value.length;
       } else {
         setToastMessage("Falha ao carregar histórico desta thread.");
       }
@@ -248,8 +311,23 @@ export default function ThreadDetailPage() {
     return () => {
       clearInterval(timer);
       cancelStreamRef.current?.();
+      stopLiveSyncLoop();
     };
-  }, [loadThreadContext]);
+  }, [loadThreadContext, stopLiveSyncLoop]);
+
+  useEffect(() => {
+    if (api.mode !== "live") {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      void refreshHistory({ silent: true });
+    }, 6000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [refreshHistory]);
 
   useEffect(() => {
     const node = messagesScrollRef.current;
@@ -328,11 +406,16 @@ export default function ThreadDetailPage() {
       event.preventDefault();
     }
 
+    if (isSending) {
+      return;
+    }
+
     const message = input.trim();
     if (!message && pendingFiles.length === 0) {
       return;
     }
 
+    const baselineServerCount = serverHistoryCountRef.current;
     const attachmentLines = pendingFiles.map((file) => {
       const kb = Math.max(1, Math.round(file.size / 1024));
       return `- ${file.name} (${file.type || "file"}, ${kb} KB)`;
@@ -360,91 +443,115 @@ export default function ThreadDetailPage() {
     setPendingFiles([]);
     setAtBottom(true);
 
-    let result:
-      | {
-          ok: boolean;
-          threadId?: string;
-          message?: string;
-          assistantReply?: string;
-          requiresApproval?: boolean;
-          error?: string;
-        }
-      | null = null;
-
+    setIsSending(true);
     try {
-      result = await api.sendMessage(params.threadId, buildPrompt(outgoingMessage));
-    } catch (error) {
-      setToastMessage(
-        error instanceof Error && error.message
-          ? error.message
-          : "Falha ao enviar mensagem para o gateway.",
-      );
-      return;
-    }
+      let result:
+        | {
+            ok: boolean;
+            threadId?: string;
+            message?: string;
+            assistantReply?: string;
+            requiresApproval?: boolean;
+            error?: string;
+          }
+        | null = null;
 
-    if (!result) {
-      setToastMessage("Falha ao enviar mensagem para o gateway.");
-      return;
-    }
-
-    if (!result.ok) {
-      if (result.requiresApproval) {
-        setState("approval");
-        setToastMessage("Command blocked. Approval required.");
-      } else {
-        setToastMessage(result.error ?? "Failed to send message.");
+      try {
+        result = await api.sendMessage(params.threadId, buildPrompt(outgoingMessage));
+      } catch (error) {
+        setToastMessage(
+          error instanceof Error && error.message
+            ? error.message
+            : "Falha ao enviar mensagem para o gateway.",
+        );
+        return;
       }
-      return;
-    }
 
-    const assistantId = `${Date.now()}-assistant`;
-    setMessages((previous) => [
-      ...previous,
-      {
-        id: assistantId,
-        role: "assistant",
-        content: "",
-        timestamp: new Date().toLocaleTimeString([], {
-          hour: "2-digit",
-          minute: "2-digit",
-        }),
-      },
-    ]);
-    setHistoryCount((previous) => previous + 1);
-    setAtBottom(true);
+      if (!result) {
+        setToastMessage("Falha ao enviar mensagem para o gateway.");
+        return;
+      }
 
-    if (api.mode === "live") {
-      setMessages((previous) =>
-        previous.map((item) =>
-          item.id === assistantId
-            ? {
-                ...item,
-                content: result.assistantReply || "Mensagem entregue ao Codex local.",
-              }
-            : item,
-        ),
-      );
-      setTimeout(() => {
-        void refreshHistory();
-      }, 2500);
-      setTimeout(() => {
-        void refreshHistory();
-      }, 7000);
-      return;
-    }
+      if (!result.ok) {
+        if (result.requiresApproval) {
+          setState("approval");
+          setToastMessage("Command blocked. Approval required.");
+        } else {
+          setToastMessage(result.error ?? "Failed to send message.");
+        }
+        return;
+      }
 
-    cancelStreamRef.current?.();
-    cancelStreamRef.current = createDemoStream(message, (eventData) => {
-      if (eventData.type === "token") {
+      const assistantId = `${Date.now()}-assistant`;
+      setMessages((previous) => [
+        ...previous,
+        {
+          id: assistantId,
+          role: "assistant",
+          content: "",
+          timestamp: new Date().toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          }),
+        },
+      ]);
+      setHistoryCount((previous) => previous + 1);
+      setAtBottom(true);
+
+      if (api.mode === "live") {
         setMessages((previous) =>
           previous.map((item) =>
             item.id === assistantId
-              ? { ...item, content: item.content + eventData.payload }
+              ? {
+                  ...item,
+                  content: result.assistantReply || "Mensagem entregue ao Codex local.",
+                }
               : item,
           ),
         );
+
+        stopLiveSyncLoop();
+        let tick = 0;
+        const maxTicks = 32;
+        const syncStep = async () => {
+          tick += 1;
+          const count = await refreshHistory({ silent: true });
+          if (count === null) {
+            return;
+          }
+
+          const hasAnyServerUpdate = count > baselineServerCount;
+          const hasServerReply = count >= baselineServerCount + 2;
+          if (hasServerReply || tick >= maxTicks) {
+            stopLiveSyncLoop();
+            if (!hasAnyServerUpdate) {
+              setToastMessage("Mensagem enviada. A aguardar resposta do Codex local.");
+            }
+          }
+        };
+
+        void syncStep();
+        liveSyncLoopRef.current = window.setInterval(() => {
+          void syncStep();
+        }, 3000);
+        return;
       }
-    });
+
+      cancelStreamRef.current?.();
+      cancelStreamRef.current = createDemoStream(message, (eventData) => {
+        if (eventData.type === "token") {
+          setMessages((previous) =>
+            previous.map((item) =>
+              item.id === assistantId
+                ? { ...item, content: item.content + eventData.payload }
+                : item,
+            ),
+          );
+        }
+      });
+    } finally {
+      setIsSending(false);
+    }
   };
 
   const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -468,32 +575,6 @@ export default function ThreadDetailPage() {
     setPendingFiles((previous) => previous.filter((_, i) => i !== index));
   };
 
-  const refreshHistory = async () => {
-    setLoadingHistory(true);
-    try {
-      const [messagesResult, threadsResult] = await Promise.allSettled([
-        api.getMessages(params.threadId, { full: true, limit: 2000 }),
-        api.getThreads(),
-      ]);
-
-      if (messagesResult.status === "fulfilled") {
-        setMessages(messagesResult.value);
-        setHistoryCount(messagesResult.value.length);
-      }
-
-      if (threadsResult.status === "fulfilled") {
-        const nextThreads = threadsResult.value;
-        if (nextThreads.length > 0) {
-          setThreadList(nextThreads);
-        }
-      }
-
-      setToastMessage("Histórico atualizado.");
-    } finally {
-      setLoadingHistory(false);
-    }
-  };
-
   const togglePause = async () => {
     if (state === "running") {
       await api.pauseThread(params.threadId);
@@ -504,6 +585,28 @@ export default function ThreadDetailPage() {
 
     setState("running");
     setToastMessage("Thread resumed.");
+  };
+
+  const renderMessageContent = (content: string) => {
+    const parts = content.split(URL_PATTERN);
+
+    return parts.map((part, index) => {
+      if (/^https?:\/\/[^\s]+$/i.test(part)) {
+        return (
+          <a
+            key={`${part}-${index}`}
+            href={part}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline decoration-blue-300/70 underline-offset-2 break-all text-blue-200 hover:text-blue-100"
+          >
+            {part}
+          </a>
+        );
+      }
+
+      return <span key={`text-${index}`}>{part}</span>;
+    });
   };
 
   return (
@@ -586,12 +689,14 @@ export default function ThreadDetailPage() {
             <button
               type="button"
               onClick={() => void refreshHistory()}
+              disabled={loadingHistory}
               className="inline-flex min-h-[44px] items-center gap-2 rounded-full border border-white/16 bg-white/8 px-3 text-xs font-semibold text-slate-200"
             >
               <RefreshCcw className={`h-3.5 w-3.5 ${loadingHistory ? "animate-spin" : ""}`} />
               {loadingHistory ? "A atualizar..." : "Atualizar histórico"}
             </button>
             <span className="text-xs text-slate-400">{historyCount} mensagens</span>
+            {isSending ? <span className="text-xs text-blue-300">A enviar…</span> : null}
           </div>
         </div>
 
@@ -616,7 +721,7 @@ export default function ThreadDetailPage() {
               }`}
             >
               <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
-                {message.content || "..."}
+                {renderMessageContent(message.content || "...")}
               </p>
               <p className="mt-1.5 text-[10px] text-slate-400">{message.timestamp}</p>
             </div>
@@ -691,6 +796,7 @@ export default function ThreadDetailPage() {
             />
             <ActionButton
               type="button"
+              disabled={isSending}
               onClick={() => fileInputRef.current?.click()}
               className="min-h-[52px] min-w-[52px] px-0"
             >
@@ -700,10 +806,16 @@ export default function ThreadDetailPage() {
               value={input}
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={handleComposerKeyDown}
+              disabled={isSending}
               placeholder="Escrever instrução... (Enter envia, Shift+Enter nova linha)"
               className="min-h-[52px] max-h-[130px] rounded-[20px] border-white/16 bg-white/8 px-4 py-3 text-[16px] text-slate-100 placeholder:text-slate-400"
             />
-            <ActionButton type="submit" tone="primary" className="min-h-[52px] min-w-[52px] px-0 md:min-w-[60px]">
+            <ActionButton
+              type="submit"
+              tone="primary"
+              disabled={isSending}
+              className="min-h-[52px] min-w-[52px] px-0 md:min-w-[60px]"
+            >
               <Send className="mx-auto h-4 w-4" />
             </ActionButton>
           </form>
