@@ -95,6 +95,48 @@ const ACCESS_LABELS: Record<AccessKey, string> = {
 
 const URL_PATTERN = /(https?:\/\/[^\s]+)/g;
 
+function sanitizeThreadMessages(items: ThreadMessage[]) {
+  const result: ThreadMessage[] = [];
+  const seenById = new Set<string>();
+
+  const toMs = (value: string) => {
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? null : parsed;
+  };
+
+  for (const item of items) {
+    if (!item?.id || seenById.has(item.id)) {
+      continue;
+    }
+
+    seenById.add(item.id);
+    const normalized = {
+      ...item,
+      content: String(item.content ?? "").trim(),
+    };
+
+    const previous = result[result.length - 1];
+    if (previous) {
+      const sameRole = previous.role === normalized.role;
+      const sameContent = previous.content === normalized.content;
+      if (sameRole && sameContent) {
+        const prevMs = toMs(previous.timestamp);
+        const nextMs = toMs(normalized.timestamp);
+        if (
+          previous.timestamp === normalized.timestamp ||
+          (prevMs !== null && nextMs !== null && Math.abs(nextMs - prevMs) <= 15000)
+        ) {
+          continue;
+        }
+      }
+    }
+
+    result.push(normalized);
+  }
+
+  return result;
+}
+
 export default function ThreadDetailPage() {
   const params = useParams<{ threadId: string }>();
   const router = useRouter();
@@ -104,6 +146,7 @@ export default function ThreadDetailPage() {
   const historyRefreshingRef = useRef(false);
   const liveSyncLoopRef = useRef<number | null>(null);
   const serverHistoryCountRef = useRef(0);
+  const optimisticReplyRef = useRef<{ baselineServerCount: number } | null>(null);
 
   const [thread, setThread] = useState<ThreadSummary | undefined>(undefined);
   const [threadList, setThreadList] = useState<ThreadSummary[]>([]);
@@ -217,10 +260,25 @@ export default function ThreadDetailPage() {
         let messageCount: number | null = null;
 
         if (messagesResult.status === "fulfilled") {
-          setMessages(messagesResult.value);
-          setHistoryCount(messagesResult.value.length);
+          const serverMessages = sanitizeThreadMessages(messagesResult.value);
+          const serverCount = serverMessages.length;
+          const optimistic = optimisticReplyRef.current;
+          const needsServerAssistant = optimistic
+            ? serverCount < optimistic.baselineServerCount + 2
+            : false;
+
+          if (!needsServerAssistant) {
+            setMessages(serverMessages);
+            if (optimistic) {
+              optimisticReplyRef.current = null;
+            }
+            setHistoryCount(serverCount);
+          } else {
+            setHistoryCount((previous) => Math.max(previous, serverCount + 1));
+          }
+
           serverHistoryCountRef.current = messagesResult.value.length;
-          messageCount = messagesResult.value.length;
+          messageCount = serverCount;
         }
 
         if (threadsResult.status === "fulfilled") {
@@ -269,9 +327,11 @@ export default function ThreadDetailPage() {
       }
 
       if (messagesResult.status === "fulfilled") {
-        setMessages(messagesResult.value);
-        setHistoryCount(messagesResult.value.length);
-        serverHistoryCountRef.current = messagesResult.value.length;
+        const serverMessages = sanitizeThreadMessages(messagesResult.value);
+        setMessages(serverMessages);
+        setHistoryCount(serverMessages.length);
+        serverHistoryCountRef.current = serverMessages.length;
+        optimisticReplyRef.current = null;
       } else {
         setToastMessage("Falha ao carregar histórico desta thread.");
       }
@@ -499,6 +559,7 @@ export default function ThreadDetailPage() {
       setAtBottom(true);
 
       if (api.mode === "live") {
+        optimisticReplyRef.current = { baselineServerCount };
         setMessages((previous) =>
           previous.map((item) =>
             item.id === assistantId
