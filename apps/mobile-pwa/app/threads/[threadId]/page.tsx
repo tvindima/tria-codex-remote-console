@@ -3,10 +3,12 @@
 import {
   Bot,
   ChevronDown,
+  Paperclip,
   Menu,
   Pause,
   Play,
   RefreshCcw,
+  Trash2,
   Send,
   Shield,
   SlidersHorizontal,
@@ -16,6 +18,7 @@ import {
 } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
 import {
+  ChangeEvent,
   FormEvent,
   KeyboardEvent,
   useCallback,
@@ -26,6 +29,7 @@ import {
 } from "react";
 
 import { CommandProgressCard } from "@/components/cards/command-progress-card";
+import { BottomNav } from "@/components/layout/bottom-nav";
 import { MobileFrame } from "@/components/layout/mobile-frame";
 import { ConfirmModal } from "@/components/ui/confirm-modal";
 import { Textarea } from "@/components/ui/textarea";
@@ -94,6 +98,7 @@ export default function ThreadDetailPage() {
   const router = useRouter();
   const cancelStreamRef = useRef<(() => void) | null>(null);
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [thread, setThread] = useState<ThreadSummary | undefined>(undefined);
   const [threadList, setThreadList] = useState<ThreadSummary[]>([]);
@@ -117,6 +122,7 @@ export default function ThreadDetailPage() {
   const [historyCount, setHistoryCount] = useState(0);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [atBottom, setAtBottom] = useState(true);
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
 
   const selectedAgent = useMemo(
     () => AGENTS.find((agent) => agent.id === selectedAgentId) ?? AGENTS[0],
@@ -323,14 +329,25 @@ export default function ThreadDetailPage() {
     }
 
     const message = input.trim();
-    if (!message) {
+    if (!message && pendingFiles.length === 0) {
       return;
     }
+
+    const attachmentLines = pendingFiles.map((file) => {
+      const kb = Math.max(1, Math.round(file.size / 1024));
+      return `- ${file.name} (${file.type || "file"}, ${kb} KB)`;
+    });
+    const attachmentsPrompt = attachmentLines.length
+      ? `\n\n[attachments]\n${attachmentLines.join("\n")}\n[/attachments]`
+      : "";
+    const outgoingMessage = `${message}${attachmentsPrompt}`.trim();
 
     const userMessage: ThreadMessage = {
       id: `${Date.now()}-user`,
       role: "user",
-      content: message,
+      content:
+        message ||
+        `Anexos enviados:\n${attachmentLines.map((line) => line.replace(/^- /, "• ")).join("\n")}`,
       timestamp: new Date().toLocaleTimeString([], {
         hour: "2-digit",
         minute: "2-digit",
@@ -340,6 +357,7 @@ export default function ThreadDetailPage() {
     setMessages((previous) => [...previous, userMessage]);
     setHistoryCount((previous) => previous + 1);
     setInput("");
+    setPendingFiles([]);
     setAtBottom(true);
 
     let result:
@@ -354,7 +372,7 @@ export default function ThreadDetailPage() {
       | null = null;
 
     try {
-      result = await api.sendMessage(params.threadId, buildPrompt(message));
+      result = await api.sendMessage(params.threadId, buildPrompt(outgoingMessage));
     } catch (error) {
       setToastMessage(
         error instanceof Error && error.message
@@ -436,6 +454,20 @@ export default function ThreadDetailPage() {
     }
   };
 
+  const onSelectFiles = (event: ChangeEvent<HTMLInputElement>) => {
+    const next = Array.from(event.target.files ?? []);
+    if (!next.length) {
+      return;
+    }
+
+    setPendingFiles((previous) => [...previous, ...next].slice(0, 6));
+    event.target.value = "";
+  };
+
+  const removePendingFile = (index: number) => {
+    setPendingFiles((previous) => previous.filter((_, i) => i !== index));
+  };
+
   const refreshHistory = async () => {
     setLoadingHistory(true);
     try {
@@ -478,7 +510,7 @@ export default function ThreadDetailPage() {
     <MobileFrame>
       <Toast open={Boolean(toastMessage)} message={toastMessage} tone="info" />
 
-      <div className="relative flex h-full min-h-0 min-w-0 flex-col overflow-x-hidden">
+      <div className="relative flex h-full min-h-0 min-w-0 flex-col overflow-x-hidden pb-[92px] md:pb-[106px]">
         <header className="flex items-center justify-between gap-2 pb-3 md:gap-3">
           <button
             type="button"
@@ -598,7 +630,7 @@ export default function ThreadDetailPage() {
               setAtBottom(true);
               scrollToBottom("smooth");
             }}
-            className="absolute bottom-[92px] right-3 z-20 inline-flex min-h-[44px] items-center gap-1.5 rounded-full border border-blue-400/40 bg-blue-500/22 px-3 py-2 text-xs font-semibold text-blue-100 shadow-[0_10px_30px_rgba(8,17,34,0.55)] md:bottom-[98px]"
+            className="absolute bottom-[176px] right-3 z-20 inline-flex min-h-[44px] items-center gap-1.5 rounded-full border border-blue-400/40 bg-blue-500/22 px-3 py-2 text-xs font-semibold text-blue-100 shadow-[0_10px_30px_rgba(8,17,34,0.55)] md:bottom-[188px]"
           >
             <ChevronDown className="h-3.5 w-3.5" />
             Ir para a última
@@ -622,7 +654,48 @@ export default function ThreadDetailPage() {
             </ActionButton>
           </div>
 
+          {pendingFiles.length ? (
+            <div className="mb-2 grid gap-2 md:grid-cols-2">
+              {pendingFiles.map((file, index) => (
+                <div
+                  key={`${file.name}-${file.size}-${index}`}
+                  className="flex items-center justify-between gap-2 rounded-xl border border-white/14 bg-white/8 px-3 py-2"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-xs font-semibold text-slate-100">{file.name}</p>
+                    <p className="text-[10px] text-slate-400">
+                      {file.type || "file"} · {Math.max(1, Math.round(file.size / 1024))} KB
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => removePendingFile(index)}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/14 bg-white/8 text-slate-300"
+                    aria-label="Remover anexo"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
+
           <form onSubmit={submitMessage} className="flex items-end gap-2 md:gap-3">
+            <input
+              ref={fileInputRef}
+              type="file"
+              className="hidden"
+              multiple
+              accept="image/*,.pdf,.txt,.md,.csv,.json,.zip,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
+              onChange={onSelectFiles}
+            />
+            <ActionButton
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="min-h-[52px] min-w-[52px] px-0"
+            >
+              <Paperclip className="mx-auto h-4 w-4" />
+            </ActionButton>
             <Textarea
               value={input}
               onChange={(event) => setInput(event.target.value)}
@@ -645,7 +718,7 @@ export default function ThreadDetailPage() {
             className="absolute inset-0 bg-black/55"
             aria-label="Close menu"
           />
-          <aside className="absolute left-0 top-0 h-full w-[84%] max-w-[420px] border-r border-white/14 bg-[#070c15]/98 p-4 shadow-[0_24px_60px_rgba(0,0,0,0.55)] backdrop-blur-xl md:max-w-[520px]">
+          <aside className="absolute left-0 top-0 flex h-full w-[84%] max-w-[420px] min-h-0 flex-col border-r border-white/14 bg-[#070c15]/98 p-4 shadow-[0_24px_60px_rgba(0,0,0,0.55)] backdrop-blur-xl md:max-w-[520px]">
             <div className="mb-3 flex items-center justify-between">
               <p className="text-lg font-semibold text-slate-100">Threads</p>
               <button
@@ -656,7 +729,7 @@ export default function ThreadDetailPage() {
                 <X className="h-4 w-4" />
               </button>
             </div>
-            <div className="space-y-2 overflow-y-auto pb-8">
+            <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pb-8">
               {threadList.length ? (
                 threadList.map((item) => (
                   <button
@@ -698,7 +771,7 @@ export default function ThreadDetailPage() {
             className="absolute inset-0 bg-black/55"
             aria-label="Close access panel"
           />
-          <aside className="absolute right-0 top-0 h-full w-[88%] max-w-[420px] border-l border-white/14 bg-[#0a111b]/98 p-4 shadow-[0_24px_60px_rgba(0,0,0,0.55)] backdrop-blur-xl md:max-w-[560px]">
+          <aside className="absolute right-0 top-0 flex h-full w-[88%] max-w-[420px] min-h-0 flex-col border-l border-white/14 bg-[#0a111b]/98 p-4 shadow-[0_24px_60px_rgba(0,0,0,0.55)] backdrop-blur-xl md:max-w-[560px]">
             <div className="mb-3 flex items-center justify-between">
               <div>
                 <p className="text-lg font-semibold text-slate-100">Agent Access</p>
@@ -713,7 +786,7 @@ export default function ThreadDetailPage() {
               </button>
             </div>
 
-            <div className="space-y-2">
+            <div className="min-h-0 flex-1 space-y-2 overflow-y-auto">
               {(Object.keys(accessPrefs) as AccessKey[]).map((key) => {
                 const enabled = accessPrefs[key];
                 return (
@@ -777,6 +850,8 @@ export default function ThreadDetailPage() {
           </span>
         </div>
       </ConfirmModal>
+
+      <BottomNav />
     </MobileFrame>
   );
 }
