@@ -21,6 +21,7 @@ import {
 
 const API_MODE = (process.env.NEXT_PUBLIC_API_MODE || "demo") as ApiRuntimeMode;
 const GATEWAY_KEY_STORAGE = "tria_gateway_api_key";
+const GATEWAY_KEY_COOKIE = "tria_gateway_api_key";
 const PAIRING_PASSPHRASE_STORAGE = "tria_pairing_passphrase";
 const DEVICE_NAME_STORAGE = "tria_device_name";
 const LIVE_FETCH_TIMEOUT_MS = Number(process.env.NEXT_PUBLIC_GATEWAY_TIMEOUT_MS ?? 6000);
@@ -46,7 +47,18 @@ function getStoredGatewayApiKey() {
     return "";
   }
 
-  return window.localStorage.getItem(GATEWAY_KEY_STORAGE) ?? "";
+  const fromStorage = window.localStorage.getItem(GATEWAY_KEY_STORAGE) ?? "";
+  if (fromStorage.trim()) {
+    return fromStorage.trim();
+  }
+
+  const fromCookie = getCookieValue(GATEWAY_KEY_COOKIE);
+  if (fromCookie) {
+    window.localStorage.setItem(GATEWAY_KEY_STORAGE, fromCookie);
+    return fromCookie;
+  }
+
+  return "";
 }
 
 function getStoredPairingPassphrase() {
@@ -65,6 +77,51 @@ function getStoredDeviceName() {
   return window.localStorage.getItem(DEVICE_NAME_STORAGE) ?? "";
 }
 
+function getCookieValue(name: string) {
+  if (typeof document === "undefined") {
+    return "";
+  }
+
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const matcher = document.cookie.match(new RegExp(`(?:^|; )${escapedName}=([^;]*)`));
+  return matcher ? decodeURIComponent(matcher[1]) : "";
+}
+
+function setCookieValue(name: string, value: string, maxAgeSeconds: number) {
+  if (typeof document === "undefined") {
+    return;
+  }
+
+  const secure = typeof window !== "undefined" && window.location.protocol === "https:" ? "; Secure" : "";
+  document.cookie = `${name}=${encodeURIComponent(value)}; Path=/; Max-Age=${Math.max(0, Math.floor(maxAgeSeconds))}; SameSite=Lax${secure}`;
+}
+
+function clearCookieValue(name: string) {
+  if (typeof document === "undefined") {
+    return;
+  }
+
+  const secure = typeof window !== "undefined" && window.location.protocol === "https:" ? "; Secure" : "";
+  document.cookie = `${name}=; Path=/; Max-Age=0; SameSite=Lax${secure}`;
+}
+
+function setStoredGatewayApiKey(value: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const normalized = value.trim();
+  if (!normalized) {
+    window.localStorage.removeItem(GATEWAY_KEY_STORAGE);
+    clearCookieValue(GATEWAY_KEY_COOKIE);
+    return;
+  }
+
+  window.localStorage.setItem(GATEWAY_KEY_STORAGE, normalized);
+  // 90 days allows PWA reopen without forcing manual pairing every session.
+  setCookieValue(GATEWAY_KEY_COOKIE, normalized, 60 * 60 * 24 * 90);
+}
+
 function withGatewayAuthHeaders(headers?: HeadersInit) {
   const key = getStoredGatewayApiKey();
 
@@ -79,6 +136,107 @@ function withGatewayAuthHeaders(headers?: HeadersInit) {
 }
 
 async function fetchLive<T>(path: string, init?: RequestInit): Promise<T> {
+  return fetchLiveInternal<T>(path, init, { allowReauth: true, attachGatewayAuth: true });
+}
+
+interface LiveFetchOptions {
+  allowReauth: boolean;
+  attachGatewayAuth: boolean;
+}
+
+async function readErrorPayload(response: Response) {
+  const contentType = response.headers.get("content-type") ?? "";
+
+  try {
+    if (contentType.includes("application/json")) {
+      return await response.json();
+    }
+    return await response.text();
+  } catch {
+    return null;
+  }
+}
+
+function normalizeLiveErrorMessage(status: number, payload: unknown) {
+  let message = `API error ${status}`;
+
+  if (payload && typeof payload === "object") {
+    const objectPayload = payload as Record<string, unknown>;
+    if (typeof objectPayload.error === "string" && objectPayload.error.trim()) {
+      message = objectPayload.error.trim();
+    } else if (typeof objectPayload.message === "string" && objectPayload.message.trim()) {
+      message = objectPayload.message.trim();
+    }
+  } else if (typeof payload === "string" && payload.trim()) {
+    message = payload.trim();
+  }
+
+  return message;
+}
+
+let silentReauthInFlight: Promise<boolean> | null = null;
+
+async function trySilentReauth() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  const storedPassphrase = getStoredPairingPassphrase().trim();
+  if (!storedPassphrase) {
+    return false;
+  }
+
+  if (silentReauthInFlight) {
+    return silentReauthInFlight;
+  }
+
+  silentReauthInFlight = (async () => {
+    try {
+      const deviceName = getStoredDeviceName().trim() || "iPhone 17 Pro Max";
+      const start = await fetchLiveInternal<PairingStartResponse>(
+        "/api/pairing/start",
+        {
+          method: "POST",
+          body: JSON.stringify({}),
+        },
+        { allowReauth: false, attachGatewayAuth: false },
+      );
+
+      const complete = await fetchLiveInternal<PairingCompleteResponse>(
+        "/api/pairing/complete",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            pairingId: start.pairingId,
+            code: start.challenge.replace(/[\s-]/g, ""),
+            passphrase: storedPassphrase,
+            deviceName,
+          }),
+        },
+        { allowReauth: false, attachGatewayAuth: false },
+      );
+
+      if (complete.paired && complete.gatewayToken) {
+        setStoredGatewayApiKey(complete.gatewayToken);
+        return true;
+      }
+    } catch {
+      // Ignore and allow normal error handling upstream.
+    } finally {
+      silentReauthInFlight = null;
+    }
+
+    return false;
+  })();
+
+  return silentReauthInFlight;
+}
+
+async function fetchLiveInternal<T>(
+  path: string,
+  init: RequestInit | undefined,
+  options: LiveFetchOptions,
+): Promise<T> {
   const baseUrl = process.env.NEXT_PUBLIC_GATEWAY_URL;
   if (!baseUrl) {
     throw new Error("NEXT_PUBLIC_GATEWAY_URL is missing in live mode");
@@ -97,7 +255,7 @@ async function fetchLive<T>(path: string, init?: RequestInit): Promise<T> {
       ...init,
       headers: {
         "Content-Type": "application/json",
-        ...withGatewayAuthHeaders(init?.headers),
+        ...(options.attachGatewayAuth ? withGatewayAuthHeaders(init?.headers) : (init?.headers ?? {})),
       },
       cache: "no-store",
       signal: controller.signal,
@@ -107,32 +265,27 @@ async function fetchLive<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   if (!response.ok) {
-    let payload: unknown = null;
-    let message = `API error ${response.status}`;
-    const contentType = response.headers.get("content-type") ?? "";
-
-    try {
-      if (contentType.includes("application/json")) {
-        payload = await response.json();
-      } else {
-        payload = await response.text();
+    if (
+      options.allowReauth &&
+      response.status === 401 &&
+      !path.startsWith("/api/pairing/") &&
+      !path.startsWith("/api/auth/")
+    ) {
+      const recovered = await trySilentReauth();
+      if (recovered) {
+        return fetchLiveInternal<T>(path, init, {
+          allowReauth: false,
+          attachGatewayAuth: true,
+        });
       }
-    } catch {
-      payload = null;
     }
 
-    if (payload && typeof payload === "object") {
-      const objectPayload = payload as Record<string, unknown>;
-      if (typeof objectPayload.error === "string" && objectPayload.error.trim()) {
-        message = objectPayload.error.trim();
-      } else if (typeof objectPayload.message === "string" && objectPayload.message.trim()) {
-        message = objectPayload.message.trim();
-      }
-    } else if (typeof payload === "string" && payload.trim()) {
-      message = payload.trim();
-    }
-
-    throw new LiveApiError(message, response.status, payload);
+    const payload = await readErrorPayload(response);
+    throw new LiveApiError(
+      normalizeLiveErrorMessage(response.status, payload),
+      response.status,
+      payload,
+    );
   }
 
   return (await response.json()) as T;
@@ -188,17 +341,7 @@ const live = API_MODE === "live";
 export const api = {
   mode: API_MODE,
   setGatewayApiKey(value: string) {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    const normalized = value.trim();
-    if (!normalized) {
-      window.localStorage.removeItem(GATEWAY_KEY_STORAGE);
-      return;
-    }
-
-    window.localStorage.setItem(GATEWAY_KEY_STORAGE, normalized);
+    setStoredGatewayApiKey(value);
   },
   hasGatewayApiKey() {
     return Boolean(getStoredGatewayApiKey());
@@ -243,6 +386,10 @@ export const api = {
     if (!live) {
       await wait(80);
       return demoHealth();
+    }
+
+    if (!this.hasGatewayApiKey() && this.hasPairingPassphrase()) {
+      await trySilentReauth();
     }
 
     if (!this.hasGatewayApiKey()) {
