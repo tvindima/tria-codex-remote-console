@@ -1,7 +1,7 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { LockKeyhole, ShieldCheck } from "lucide-react";
+import { Copy, Eye, EyeOff, LockKeyhole, ShieldCheck } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
@@ -33,6 +33,11 @@ export default function LoginPage() {
   const [pairingHint, setPairingHint] = useState("123456");
   const [pairingCode, setPairingCode] = useState("");
   const [pairingPassphrase, setPairingPassphrase] = useState("");
+  const [savedPassphrase, setSavedPassphrase] = useState("");
+  const [deviceName, setDeviceName] = useState("iPhone 17 Pro Max");
+  const [rememberPassphrase, setRememberPassphrase] = useState(true);
+  const [showPassphrase, setShowPassphrase] = useState(false);
+  const [quickPairBusy, setQuickPairBusy] = useState(false);
   const [toast, setToast] = useState<{
     open: boolean;
     message: string;
@@ -62,6 +67,19 @@ export default function LoginPage() {
       cancelled = true;
       clearInterval(timer);
     };
+  }, []);
+
+  useEffect(() => {
+    const storedPassphrase = api.getPairingPassphrase();
+    if (storedPassphrase) {
+      setSavedPassphrase(storedPassphrase);
+      setRememberPassphrase(true);
+    }
+
+    const storedDeviceName = api.getDeviceName();
+    if (storedDeviceName) {
+      setDeviceName(storedDeviceName);
+    }
   }, []);
 
   useEffect(() => {
@@ -131,6 +149,8 @@ export default function LoginPage() {
                   const response = await api.startPairing();
                   setPairingId(response.pairingId);
                   setPairingHint(response.challenge || "------");
+                  setPairingCode(response.challenge || "");
+                  setPairingPassphrase(savedPassphrase || "");
                 } catch {
                   setPairingId("");
                   setPairingHint("------");
@@ -170,6 +190,7 @@ export default function LoginPage() {
           if (!open) {
             setPairingCode("");
             setPairingPassphrase("");
+            setShowPassphrase(false);
           }
         }}
       >
@@ -177,28 +198,133 @@ export default function LoginPage() {
           <DialogHeader>
             <DialogTitle>Emparelhar novo dispositivo</DialogTitle>
             <DialogDescription className="text-slate-300">
-              Introduza o pairing code temporário para concluir o registo.
+              Introduza o pairing code temporário para concluir o registo ou use emparelhamento rápido.
             </DialogDescription>
           </DialogHeader>
 
           <div className="space-y-2">
-            <p className="text-xs text-slate-400">Pairing code: {pairingHint}</p>
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs text-slate-400">Pairing code: {pairingHint}</p>
+              <button
+                type="button"
+                onClick={async () => {
+                  if (!pairingHint || pairingHint === "------") {
+                    return;
+                  }
+                  await navigator.clipboard.writeText(pairingHint);
+                  setToast({
+                    open: true,
+                    message: "Código copiado.",
+                    tone: "info",
+                  });
+                }}
+                className="inline-flex min-h-[36px] items-center gap-1 rounded-full border border-white/16 bg-white/8 px-2.5 text-[11px] font-semibold text-slate-200"
+              >
+                <Copy className="h-3.5 w-3.5" /> Copiar
+              </button>
+            </div>
             <Input
               value={pairingCode}
               onChange={(event) => setPairingCode(event.target.value)}
               inputMode="numeric"
-              placeholder="123456"
+              placeholder="123-456"
+              className="h-[52px] rounded-[18px] border-white/16 bg-white/8 text-slate-100 placeholder:text-slate-500"
+            />
+            <Input
+              value={deviceName}
+              onChange={(event) => setDeviceName(event.target.value)}
+              placeholder="Nome do dispositivo (ex: iPhone 17 Pro Max)"
               className="h-[52px] rounded-[18px] border-white/16 bg-white/8 text-slate-100 placeholder:text-slate-500"
             />
             {api.mode === "live" ? (
-              <Input
-                value={pairingPassphrase}
-                onChange={(event) => setPairingPassphrase(event.target.value)}
-                placeholder="Palavra-passe de emparelhamento"
-                className="h-[52px] rounded-[18px] border-white/16 bg-white/8 text-slate-100 placeholder:text-slate-500"
-              />
+              <div className="relative">
+                <Input
+                  type={showPassphrase ? "text" : "password"}
+                  value={pairingPassphrase}
+                  onChange={(event) => setPairingPassphrase(event.target.value)}
+                  placeholder={savedPassphrase ? "Palavra-passe guardada (pode editar)" : "Palavra-passe de emparelhamento"}
+                  className="h-[52px] rounded-[18px] border-white/16 bg-white/8 pr-11 text-slate-100 placeholder:text-slate-500"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassphrase((previous) => !previous)}
+                  className="absolute right-2 top-1/2 inline-flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full border border-white/14 bg-white/8 text-slate-300"
+                  aria-label={showPassphrase ? "Ocultar palavra-passe" : "Mostrar palavra-passe"}
+                >
+                  {showPassphrase ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+            ) : null}
+            {api.mode === "live" ? (
+              <label className="flex items-center gap-2 text-xs text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={rememberPassphrase}
+                  onChange={(event) => setRememberPassphrase(event.target.checked)}
+                />
+                Guardar palavra-passe neste dispositivo
+              </label>
             ) : null}
           </div>
+
+          {api.mode === "live" && savedPassphrase ? (
+            <ActionButton
+              tone="success"
+              className="w-full"
+              onClick={async () => {
+                setQuickPairBusy(true);
+                try {
+                  const start = pairingId ? null : await api.startPairing();
+                  const activePairingId = pairingId || start?.pairingId || "";
+                  const challenge = pairingHint !== "------" ? pairingHint : start?.challenge || "";
+
+                  const response = await api.completePairing({
+                    pairingId: activePairingId,
+                    code: challenge.replace(/[\s-]/g, ""),
+                    passphrase: savedPassphrase,
+                    deviceName: deviceName.trim() || "iPhone 17 Pro Max",
+                  });
+
+                  if (!response.paired || !response.gatewayToken) {
+                    setToast({
+                      open: true,
+                      message: response.error ?? "Emparelhamento rápido falhou.",
+                      tone: "danger",
+                    });
+                    return;
+                  }
+
+                  api.setGatewayApiKey(response.gatewayToken);
+                  api.setDeviceName(deviceName.trim() || "iPhone 17 Pro Max");
+                  const nextHealth = await api.health();
+                  setHealth(nextHealth);
+                  setNode(nextHealth.node);
+                  setPairingOpen(false);
+                  setPairingId("");
+                  setPairingCode("");
+                  setPairingPassphrase("");
+                  setToast({
+                    open: true,
+                    message: "Emparelhado sem escrever código.",
+                    tone: "success",
+                  });
+                } catch (error) {
+                  setToast({
+                    open: true,
+                    message:
+                      error instanceof Error && error.message
+                        ? error.message
+                        : "Falha no emparelhamento rápido.",
+                    tone: "danger",
+                  });
+                } finally {
+                  setQuickPairBusy(false);
+                }
+              }}
+            >
+              {quickPairBusy ? "A emparelhar..." : "Emparelhar sem escrever"}
+            </ActionButton>
+          ) : null}
 
           <DialogFooter className="mt-2 flex-col gap-2 sm:flex-row">
             <ActionButton className="w-full" onClick={() => setPairingOpen(false)}>
@@ -208,7 +334,9 @@ export default function LoginPage() {
               tone="primary"
               className="w-full"
               onClick={async () => {
-                if (api.mode === "live" && !pairingPassphrase.trim()) {
+                const normalizedCode = pairingCode.replace(/[\s-]/g, "").trim();
+                const normalizedPassphrase = pairingPassphrase.trim() || savedPassphrase.trim();
+                if (api.mode === "live" && !normalizedPassphrase) {
                   setToast({
                     open: true,
                     message: "Introduza a palavra-passe de emparelhamento.",
@@ -227,9 +355,9 @@ export default function LoginPage() {
 
                     const response = await api.completePairing({
                       pairingId: activePairingId,
-                      code: pairingCode,
-                      passphrase: pairingPassphrase,
-                      deviceName: "iPhone 17 Pro Max",
+                      code: normalizedCode,
+                      passphrase: normalizedPassphrase,
+                      deviceName: deviceName.trim() || "iPhone 17 Pro Max",
                     });
 
                     if (!response.paired) {
@@ -251,6 +379,14 @@ export default function LoginPage() {
                     }
 
                     api.setGatewayApiKey(response.gatewayToken);
+                    api.setDeviceName(deviceName.trim() || "iPhone 17 Pro Max");
+                    if (rememberPassphrase) {
+                      api.setPairingPassphrase(normalizedPassphrase);
+                      setSavedPassphrase(normalizedPassphrase);
+                    } else {
+                      api.setPairingPassphrase("");
+                      setSavedPassphrase("");
+                    }
                     const nextHealth = await api.health();
                     setHealth(nextHealth);
                     setNode(nextHealth.node);
@@ -278,7 +414,7 @@ export default function LoginPage() {
                   return;
                 }
 
-                if (pairingCode === "123456") {
+                if (normalizedCode === "123456") {
                   setPairingOpen(false);
                   setPairingCode("");
                   setToast({

@@ -21,6 +21,8 @@ import {
 
 const API_MODE = (process.env.NEXT_PUBLIC_API_MODE || "demo") as ApiRuntimeMode;
 const GATEWAY_KEY_STORAGE = "tria_gateway_api_key";
+const PAIRING_PASSPHRASE_STORAGE = "tria_pairing_passphrase";
+const DEVICE_NAME_STORAGE = "tria_device_name";
 const LIVE_FETCH_TIMEOUT_MS = Number(process.env.NEXT_PUBLIC_GATEWAY_TIMEOUT_MS ?? 6000);
 
 const wait = (ms = 220) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -45,6 +47,22 @@ function getStoredGatewayApiKey() {
   }
 
   return window.localStorage.getItem(GATEWAY_KEY_STORAGE) ?? "";
+}
+
+function getStoredPairingPassphrase() {
+  if (typeof window === "undefined") {
+    return "";
+  }
+
+  return window.localStorage.getItem(PAIRING_PASSPHRASE_STORAGE) ?? "";
+}
+
+function getStoredDeviceName() {
+  if (typeof window === "undefined") {
+    return "";
+  }
+
+  return window.localStorage.getItem(DEVICE_NAME_STORAGE) ?? "";
 }
 
 function withGatewayAuthHeaders(headers?: HeadersInit) {
@@ -184,6 +202,41 @@ export const api = {
   },
   hasGatewayApiKey() {
     return Boolean(getStoredGatewayApiKey());
+  },
+  setPairingPassphrase(value: string) {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const normalized = value.trim();
+    if (!normalized) {
+      window.localStorage.removeItem(PAIRING_PASSPHRASE_STORAGE);
+      return;
+    }
+
+    window.localStorage.setItem(PAIRING_PASSPHRASE_STORAGE, normalized);
+  },
+  getPairingPassphrase() {
+    return getStoredPairingPassphrase();
+  },
+  hasPairingPassphrase() {
+    return Boolean(getStoredPairingPassphrase());
+  },
+  setDeviceName(value: string) {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const normalized = value.trim();
+    if (!normalized) {
+      window.localStorage.removeItem(DEVICE_NAME_STORAGE);
+      return;
+    }
+
+    window.localStorage.setItem(DEVICE_NAME_STORAGE, normalized);
+  },
+  getDeviceName() {
+    return getStoredDeviceName();
   },
 
   async health(): Promise<GatewayHealth> {
