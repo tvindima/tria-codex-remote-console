@@ -502,7 +502,7 @@ export class RuntimeService {
       `tria-codex-reply-${threadId}-${Date.now()}.txt`,
     );
     const executionCwd = fs.existsSync(thread.cwd) ? thread.cwd : process.cwd();
-    const timeoutMs = Number(process.env.TRIA_CODEX_EXEC_TIMEOUT_MS ?? 45000);
+    const timeoutMs = Number(process.env.TRIA_CODEX_EXEC_TIMEOUT_MS ?? 600000);
     void (async () => {
       const run = await execa(
         "codex",

@@ -1,143 +1,91 @@
 # TRIA Codex Remote Console - Mobile E2E Validation
 
-Date: 2026-05-01 00:08 (Europe/Lisbon)  
-Environment: Mac Mini local node + public PWA deploy
+Date: 2026-05-01 (Europe/Lisbon)
 
-## Current status
+## Estado atual
 
-- Readiness: `RESULT=READY_FOR_REMOTE_IPHONE_TEST`
-- Gateway health: `LIVE_MODE`
-- Tunnel: `tailscale` online (`cloudflared` process also online)
-- Codex adapter: `cli-pty` available
-- Supervisor: LaunchDaemon running (boot-level)
-- LaunchAgent: removed to avoid dual-supervisor port conflicts
+- Gateway: `LIVE_MODE` (online)
+- Tunnel: `tailscale` online
+- Adapter: `cli-pty` online
+- URL PWA: `https://codex.trioto.tech/login` (HTTP 200)
+- Gateway público seguro: `https://tria-codex-gw.trioto.tech`
+- Readiness script: `READY_FOR_REMOTE_IPHONE_TEST`
+- Supervisor atual: `LaunchAgent` + `LaunchDaemon` aparecem como running; listener ativo confirmado em `127.0.0.1:8787`
 
-## Public endpoints
+## Ajustes aplicados nesta validação
 
-- PWA (stable): `https://tria-codex-remote-console.vercel.app`
-- Latest production artifact: `https://tria-codex-remote-console-fmfj26rbz-toinos-projects.vercel.app`
-- Custom domain target: `https://codex.trioto.tech`
-- Secure gateway endpoint: `https://tria-codex-gw.trioto.tech`
+1. Worker de entrega endurecido:
+- `delivered_to_codex` e `codex_running` só após spawn real do processo.
+- `codex_response_started` deixou de disparar por `stderr` (evita falso positivo).
+- `stdout/stderr` continuam capturados para Delivery Proof.
 
-## Validated evidence
+2. Timeout do Codex aumentado para evitar falhas prematuras:
+- `TRIA_CODEX_EXEC_TIMEOUT_MS` default alterado para `600000` (10 min).
 
-1. Live gateway
-- `./scripts/verify-live-readiness.sh`:
-  - `[PASS] LaunchDaemon com.tria.mac-gateway running (boot-level).`
-  - `[PASS] Gateway listening on 127.0.0.1:8787.`
-  - `[PASS] Healthcheck OK (mode=live, connectionState=LIVE_MODE, tunnelOnline=true, codexAvailable=true).`
-  - `[PASS] Tailscale reachable (backend=Running, selfOnline=true).`
-  - `[PASS] Codex CLI disponível (codex-cli 0.128.0-alpha.1).`
-  - `RESULT=READY_FOR_REMOTE_IPHONE_TEST`
+3. Runtime reiniciado e validado:
+- `pnpm --filter mac-gateway build`
+- restart de `com.tria.mac-gateway`
+- health `LIVE_MODE` confirmado.
 
-2. Local health payload
-- `GET http://127.0.0.1:8787/api/health` (with API key):
-  - `status=ok`
-  - `mode=live`
-  - `connectionState=LIVE_MODE`
-  - `codex.available=true`
-  - `tunnel.online=true`
+## Evidência objetiva (App -> Gateway -> Codex)
 
-3. Thread history (real)
-- `GET /api/threads/:id/messages?full=1` returns full timeline (example: `count=388`), including previous interaction state.
+### A) Thread idle (real) completou
 
-4. Frontend deployment
-- Production deploy executed successfully on Vercel.
-- Build logs report `status: Ready`.
-- `https://tria-codex-remote-console.vercel.app/login` returns `HTTP 200`.
+- Job ID: `45f0bbd0-1c95-48fc-b97f-1bcc2b43534c`
+- Status final: `codex_response_completed`
+- Duração: ~113s
+- Prova: lifecycle completo sem timeout prematuro.
 
-## DNS blocker for codex.trioto.tech
+### B) Thread ativa (real) completou
 
-Vercel `domains inspect` still reports the domain is **not configured** and requires:
+- Job ID: `f9914fd5-51e4-4a09-ace0-0fcb9278ae53`
+- Status final: `codex_response_completed`
+- Duração: ~21s
+- Prova: execução no mesmo thread ativo sem falha.
 
-- `A codex.trioto.tech -> 76.76.21.21`
+### C) Prova de filesystem via app
 
-Current verification still fails from resolver checks:
+- Job ID: `dcf3a317-d1f3-45f8-becb-eeb173635b0e`
+- Status final: `codex_response_completed`
+- Ficheiro criado: `/Volumes/SSD_4TB/tria remote codex console./tria-codex-remote/PROVA_PWA_CODEX_REMOTE_LIVE.txt`
+- Conteúdo validado: `PROVA_LIVE_OK`
 
-- `curl -I https://codex.trioto.tech/login` -> `Could not resolve host`
+### D) Prova via tunnel público (não local)
 
-Cloudflare API integration in this session is currently read-only for DNS writes (`Authentication error` on create record), so the DNS A-record could not be applied automatically from this runtime.
+- Gateway health via domain: `LIVE_MODE`
+- Job ID: `dbe69510-3037-4e5e-9369-ac6cc208d4a9`
+- Status final: `codex_response_completed`
+- Prova: envio e execução remota pelo endpoint seguro `tria-codex-gw.trioto.tech`.
 
-## Files changed in this step
+### E) Lifecycle completo por mensagem
 
-- `apps/mac-gateway/src/routes/threads.ts`
-- `apps/mobile-pwa/lib/api.ts`
-- `apps/mobile-pwa/app/threads/[threadId]/page.tsx`
+Job ID `a664407b-f467-471a-9430-c518e0847c0b`:
+
+1. `created_local`
+2. `sent_to_gateway`
+3. `acknowledged_by_gateway`
+4. `queued_for_codex`
+5. `delivered_to_codex`
+6. `codex_running`
+7. `codex_response_started`
+8. `codex_response_completed`
+
+## Estado de readiness atual
+
+`./scripts/verify-live-readiness.sh` (última execução):
+
+- `[PASS] LaunchAgent com.tria.mac-gateway running (session user).`
+- `[PASS] LaunchDaemon com.tria.mac-gateway running (boot-level).`
+- `[PASS] Gateway listening on 127.0.0.1:8787.`
+- `[PASS] Healthcheck OK (mode=live, connectionState=LIVE_MODE, tunnelOnline=true, codexAvailable=true).`
+- `[PASS] Tailscale reachable (backend=Running, selfOnline=true).`
+- `[PASS] Cloudflare tunnel process running.`
+- `[PASS] Codex CLI disponível (codex-cli 0.128.0-alpha.1).`
+- `RESULT=READY_FOR_REMOTE_IPHONE_TEST`
+
+## Ficheiros alterados nesta ronda
+
+- `apps/mac-gateway/src/services/message-job-service.ts`
+- `apps/mac-gateway/src/services/runtime-service.ts`
+- `apps/mac-gateway/scripts/run-gateway.sh`
 - `MOBILE_E2E_VALIDATION.md`
-
----
-
-## 2026-05-01 02:40 - Message Delivery Reliability Pass (App -> Gateway -> Codex)
-
-Objetivo desta iteração: remover "sucesso visual" sem entrega real e implementar ACK/job lifecycle persistente.
-
-### Implementado
-
-1. **Lifecycle persistente de mensagens**
-- `created_local`
-- `sent_to_gateway`
-- `acknowledged_by_gateway`
-- `queued_for_codex`
-- `delivered_to_codex`
-- `codex_running`
-- `codex_response_started`
-- `codex_response_completed`
-- `failed`
-
-2. **Persistência SQLite**
-- Tabelas: `thread_messages_delivery`, `message_jobs`, `message_job_events`.
-- Endpoint: `GET /api/jobs/:jobId`.
-- Stream SSE: `GET /api/jobs/:jobId/events`.
-
-3. **ACK real no envio**
-- `POST /api/threads/:id/messages` agora devolve:
-```json
-{
-  "ok": true,
-  "messageId": "...",
-  "jobId": "...",
-  "status": "queued_for_codex"
-}
-```
-
-4. **Worker de jobs**
-- Consome jobs `queued_for_codex`.
-- Executa `codex exec resume`.
-- Grava eventos + erros tipificados.
-- Evita concorrência duplicada no `processQueue` com lock interno (`queueTickInFlight`).
-
-5. **Frontend em modo live**
-- `clientMessageId` por mensagem.
-- Estado por balão de utilizador:
-  - `Gateway ✓`
-  - `Codex ✓`
-  - `Running`
-  - `Failed` (+ erro detalhado)
-- SSE como mecanismo principal.
-- Polling apenas fallback quando SSE falha.
-- Bloqueio explícito quando thread não está ligada ao Codex real.
-
-### Evidência técnica (real)
-
-#### Sucesso end-to-end
-
-- Job: `5fe98808-6122-4c9d-a223-e7bbcb88378e`
-- `GET /api/jobs/:jobId`:
-  - `status=codex_response_completed`
-  - `error=null`
-  - `adapter=cli-pty`
-- SSE (`/api/jobs/:jobId/events`) registou sequência completa de `created_local` até `codex_response_completed`.
-
-#### Falha explícita controlada
-
-- Job: `457eb1da-b218-483c-ad07-58c9ea3be2e8`
-- Ambiente de teste com adapter indisponível (`adapter=none` em porta isolada 8791).
-- `GET /api/jobs/:jobId`:
-  - `status=failed`
-  - `error.code=pty_not_available`
-  - `error.message="Adapter indisponível para executar no Codex local."`
-
-### Notas operacionais
-
-- Foi necessário reconstruir o binding local do `sqlite3` (`node_sqlite3.node`) neste workspace para correr o gateway com o build atual.
-- O host tem watchdog/processos externos que terminam alguns arranques em `nohup`; para validações técnicas foi usada sessão dedicada de runtime.

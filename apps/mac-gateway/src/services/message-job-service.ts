@@ -102,9 +102,12 @@ function escapeShellArg(input: string) {
 
 function compactOutput(input: string, limit = 6000) {
   const normalized = String(input ?? "")
-    // Strip ANSI escape sequences and non-printable control chars that can break payload parsing.
-    .replace(/\u001b\[[0-9;]*[A-Za-z]/g, "")
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
+    // Strip ANSI/OSC escape sequences and control chars that can break JSON payloads.
+    .replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\u001B\][^\u0007]*(?:\u0007|\u001B\\|\u009C)/g, "")
+    .replace(/\u001B[@-_]/g, "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, "")
     .trim();
   if (!normalized) {
     return "";
@@ -1009,7 +1012,7 @@ export class MessageJobService {
       `tria-codex-reply-${job.id}.txt`,
     );
     const executionCwd = fs.existsSync(thread.cwd) ? thread.cwd : process.cwd();
-    const timeoutMs = Number(process.env.TRIA_CODEX_EXEC_TIMEOUT_MS ?? 45000);
+    const timeoutMs = Number(process.env.TRIA_CODEX_EXEC_TIMEOUT_MS ?? 600000);
     const commandArgs = [
       "exec",
       "resume",
@@ -1030,27 +1033,8 @@ export class MessageJobService {
         codexThreadId: thread.id,
       });
 
-      await this.recordEvent(ref, "delivered_to_codex", {
-        started: true,
-        attemptsIncrement: true,
-        payload: {
-          workerMode: "codex-worker",
-          adapter: job.adapter,
-          command: executedCommand,
-          codexThreadId: thread.id,
-        },
-      });
-      await this.recordEvent(ref, "codex_running", {
-        payload: {
-          workerMode: "codex-worker",
-          adapter: job.adapter,
-          command: executedCommand,
-          codexThreadId: thread.id,
-        },
-      });
-
       let responseStarted = false;
-      const markResponseStarted = async (source: "stdout" | "stderr") => {
+      const markResponseStarted = async (source: "stdout" | "output_file") => {
         if (responseStarted) {
           return;
         }
@@ -1077,14 +1061,41 @@ export class MessageJobService {
         processPid,
         ptySessionId: processPid ? `cli-pty:${processPid}` : null,
       });
+      await this.recordEvent(ref, "delivered_to_codex", {
+        started: true,
+        attemptsIncrement: true,
+        payload: {
+          workerMode: "codex-worker",
+          adapter: job.adapter,
+          command: executedCommand,
+          codexThreadId: thread.id,
+          ptySessionId: processPid ? `cli-pty:${processPid}` : null,
+          processPid,
+        },
+      });
+      await this.recordEvent(ref, "codex_running", {
+        payload: {
+          workerMode: "codex-worker",
+          adapter: job.adapter,
+          command: executedCommand,
+          codexThreadId: thread.id,
+          ptySessionId: processPid ? `cli-pty:${processPid}` : null,
+          processPid,
+        },
+      });
 
       subprocess.stdout?.on("data", (chunk) => {
-        stdoutBuffer = compactOutput(`${stdoutBuffer}${String(chunk ?? "")}`);
-        void markResponseStarted("stdout");
+        const piece = compactOutput(String(chunk ?? ""), 1200);
+        if (piece) {
+          stdoutBuffer = compactOutput(`${stdoutBuffer}\n${piece}`);
+          void markResponseStarted("stdout");
+        }
       });
       subprocess.stderr?.on("data", (chunk) => {
-        stderrBuffer = compactOutput(`${stderrBuffer}${String(chunk ?? "")}`);
-        void markResponseStarted("stderr");
+        const piece = compactOutput(String(chunk ?? ""), 1200);
+        if (piece) {
+          stderrBuffer = compactOutput(`${stderrBuffer}\n${piece}`);
+        }
       });
 
       const run = await subprocess;
