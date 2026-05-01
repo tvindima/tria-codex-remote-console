@@ -10,11 +10,11 @@ import { Toast } from "@/components/ui/toast";
 import { ActionButton } from "@/components/vistaulux/action-button";
 import { VistaCard } from "@/components/vistaulux/vista-card";
 import { api } from "@/lib/api";
-import { mockMacNode } from "@/lib/mock-data";
-import { AuditLog } from "@/lib/types";
+import { AuditLog, GatewayHealth } from "@/lib/types";
 
 export default function LogsPage() {
   const [logs, setLogs] = useState<AuditLog[]>([]);
+  const [health, setHealth] = useState<GatewayHealth | null>(null);
   const [showRevoke, setShowRevoke] = useState(false);
   const [toast, setToast] = useState<{ open: boolean; message: string; tone: "success" | "danger" | "info" }>({
     open: false,
@@ -24,6 +24,7 @@ export default function LogsPage() {
 
   useEffect(() => {
     api.getLogs().then(setLogs);
+    api.health().then(setHealth);
   }, []);
 
   useEffect(() => {
@@ -39,7 +40,7 @@ export default function LogsPage() {
     const blob = new Blob([JSON.stringify(logs, null, 2)], { type: "application/json" });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = "tria-codex-audit-demo.json";
+    link.download = api.mode === "live" ? "tria-codex-audit-live.json" : "tria-codex-audit-demo.json";
     link.click();
     URL.revokeObjectURL(link.href);
     setToast({ open: true, message: "Logs exportados (.json).", tone: "success" });
@@ -55,8 +56,8 @@ export default function LogsPage() {
           <div className="mt-3 grid gap-1.5 text-sm text-slate-300">
             <p>Secure Session — Active</p>
             <p>Device Pairing — iPhone 17 Pro Max</p>
-            <p>Tunnel — WireGuard / {mockMacNode.tunnel}</p>
-            <p>Latency — {mockMacNode.latencyMs}ms</p>
+            <p>Tunnel — WireGuard / {health?.tunnel.mode ?? "tailscale"}</p>
+            <p>Latency — {health?.node.latencyMs ?? 12}ms</p>
           </div>
         </VistaCard>
 
@@ -69,7 +70,7 @@ export default function LogsPage() {
           </div>
         </VistaCard>
 
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-2 gap-2 md:max-w-[420px]">
           <ActionButton onClick={exportLogs}>Export logs</ActionButton>
           <ActionButton tone="danger" onClick={() => setShowRevoke(true)}>
             Revoke iPhone

@@ -65,9 +65,9 @@ export function AppShell({
   return (
     <MobileFrame>
       <header className="mb-4 min-w-0 space-y-2 px-1">
-        <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start justify-between gap-3 md:gap-5">
           <div className="min-w-0">
-            <h1 className="text-[30px] font-bold leading-[1.04] text-slate-50">{title}</h1>
+            <h1 className="text-[30px] font-bold leading-[1.04] text-slate-50 md:text-[34px]">{title}</h1>
             {subtitle ? <p className="mt-1 text-sm text-slate-300">{subtitle}</p> : null}
             <div className="mt-2 flex flex-wrap items-center gap-2">
               <StatusPill
@@ -86,7 +86,7 @@ export function AppShell({
         </div>
       </header>
 
-      <main className="flex-1 min-w-0 overflow-x-hidden overflow-y-auto pb-32">{children}</main>
+      <main className="flex-1 min-w-0 overflow-x-hidden overflow-y-auto pb-32 md:pb-[7.25rem]">{children}</main>
 
       {showNav ? <BottomNav /> : null}
     </MobileFrame>

@@ -46,10 +46,14 @@ export default function ProjectsPage() {
           />
         </div>
 
-        <div className="space-y-3">
-          {filtered.map((project) => (
-            <ProjectCard key={project.id} project={project} />
-          ))}
+        <div className="grid gap-3 md:grid-cols-2">
+          {filtered.length ? (
+            filtered.map((project) => <ProjectCard key={project.id} project={project} />)
+          ) : (
+            <div className="rounded-2xl border border-white/12 bg-white/6 p-4 text-sm text-slate-300">
+              No projects found for this filter.
+            </div>
+          )}
         </div>
       </ScreenTransition>
     </AppShell>

@@ -34,7 +34,7 @@ export default function ProjectDetailPage() {
           <p className="mt-1 text-sm text-slate-400">Diffs: {project?.diffs ?? 0}</p>
         </VistaCard>
 
-        <div className="space-y-3">
+        <div className="grid gap-3 md:grid-cols-2">
           {projectThreads.map((thread) => (
             <ThreadCard key={thread.id} thread={thread} />
           ))}

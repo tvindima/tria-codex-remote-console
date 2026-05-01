@@ -478,8 +478,8 @@ export default function ThreadDetailPage() {
     <MobileFrame>
       <Toast open={Boolean(toastMessage)} message={toastMessage} tone="info" />
 
-      <div className="relative flex min-h-[calc(100vh-9.5rem)] min-w-0 flex-col overflow-x-hidden">
-        <header className="flex items-center justify-between gap-3 pb-3">
+      <div className="relative flex h-full min-h-0 min-w-0 flex-col overflow-x-hidden">
+        <header className="flex items-center justify-between gap-2 pb-3 md:gap-3">
           <button
             type="button"
             onClick={() => setShowDrawer(true)}
@@ -489,19 +489,19 @@ export default function ThreadDetailPage() {
             <Menu className="h-5 w-5" />
           </button>
 
-          <div className="relative">
+          <div className="relative min-w-0 flex-1">
             <button
               type="button"
               onClick={() => setShowAgentMenu((value) => !value)}
-              className="inline-flex min-h-[44px] items-center gap-2 rounded-full border border-white/14 bg-white/8 px-4 text-sm font-semibold text-slate-100"
+              className="inline-flex min-h-[44px] max-w-full items-center gap-2 rounded-full border border-white/14 bg-white/8 px-3 text-sm font-semibold text-slate-100"
             >
               <Bot className="h-4 w-4 text-blue-300" />
-              {selectedAgent.label}
+              <span className="truncate">{selectedAgent.label}</span>
               <ChevronDown className="h-4 w-4 text-slate-300" />
             </button>
 
             {showAgentMenu ? (
-              <div className="absolute left-0 top-12 z-40 w-[240px] rounded-2xl border border-white/14 bg-[#0b111b]/95 p-2 shadow-[0_24px_60px_rgba(0,0,0,0.45)] backdrop-blur-xl">
+              <div className="absolute left-0 top-12 z-40 w-[240px] max-w-[92vw] rounded-2xl border border-white/14 bg-[#0b111b]/95 p-2 shadow-[0_24px_60px_rgba(0,0,0,0.45)] backdrop-blur-xl">
                 {AGENTS.map((agent) => (
                   <button
                     key={agent.id}
@@ -565,7 +565,7 @@ export default function ThreadDetailPage() {
 
         <div
           ref={messagesScrollRef}
-          className="flex-1 space-y-3 overflow-x-hidden overflow-y-auto pb-36 pr-1"
+          className="flex-1 space-y-3 overflow-x-hidden overflow-y-auto pb-4 pr-1"
         >
           <CommandProgressCard
             command={api.mode === "live" ? "codex exec resume" : "npm run test:tenant"}
@@ -577,7 +577,7 @@ export default function ThreadDetailPage() {
           {messages.map((message) => (
             <div
               key={message.id}
-              className={`w-fit max-w-[94%] overflow-hidden rounded-3xl border px-4 py-3 text-[15px] leading-relaxed ${
+              className={`w-fit max-w-[94%] overflow-hidden rounded-3xl border px-4 py-3 text-[15px] leading-relaxed md:max-w-[74%] ${
                 message.role === "user"
                   ? "ml-auto border-blue-400/45 bg-blue-500/18 text-blue-100"
                   : "mr-auto border-white/14 bg-white/8 text-slate-100"
@@ -598,15 +598,15 @@ export default function ThreadDetailPage() {
               setAtBottom(true);
               scrollToBottom("smooth");
             }}
-            className="absolute bottom-[140px] right-3 z-20 inline-flex min-h-[44px] items-center gap-1.5 rounded-full border border-blue-400/40 bg-blue-500/22 px-3 py-2 text-xs font-semibold text-blue-100 shadow-[0_10px_30px_rgba(8,17,34,0.55)]"
+            className="absolute bottom-[92px] right-3 z-20 inline-flex min-h-[44px] items-center gap-1.5 rounded-full border border-blue-400/40 bg-blue-500/22 px-3 py-2 text-xs font-semibold text-blue-100 shadow-[0_10px_30px_rgba(8,17,34,0.55)] md:bottom-[98px]"
           >
             <ChevronDown className="h-3.5 w-3.5" />
             Ir para a última
           </button>
         ) : null}
 
-        <div className="absolute inset-x-0 bottom-0 z-30 border-t border-white/12 bg-[#070c15]/95 px-2 pb-3 pt-2 backdrop-blur-xl">
-          <div className="mb-2 grid grid-cols-3 gap-2">
+        <div className="mt-2 border-t border-white/12 bg-[#070c15]/95 px-2 pb-3 pt-2 backdrop-blur-xl">
+          <div className="mb-2 grid grid-cols-3 gap-2 md:grid-cols-3">
             <ActionButton onClick={() => router.push("/diffs")}>Diffs</ActionButton>
             <ActionButton onClick={togglePause}>
               <span className="inline-flex items-center gap-1.5">
@@ -622,7 +622,7 @@ export default function ThreadDetailPage() {
             </ActionButton>
           </div>
 
-          <form onSubmit={submitMessage} className="flex items-end gap-2">
+          <form onSubmit={submitMessage} className="flex items-end gap-2 md:gap-3">
             <Textarea
               value={input}
               onChange={(event) => setInput(event.target.value)}
@@ -630,7 +630,7 @@ export default function ThreadDetailPage() {
               placeholder="Escrever instrução... (Enter envia, Shift+Enter nova linha)"
               className="min-h-[52px] max-h-[130px] rounded-[20px] border-white/16 bg-white/8 px-4 py-3 text-[16px] text-slate-100 placeholder:text-slate-400"
             />
-            <ActionButton type="submit" tone="primary" className="min-h-[52px] min-w-[52px] px-0">
+            <ActionButton type="submit" tone="primary" className="min-h-[52px] min-w-[52px] px-0 md:min-w-[60px]">
               <Send className="mx-auto h-4 w-4" />
             </ActionButton>
           </form>
@@ -645,7 +645,7 @@ export default function ThreadDetailPage() {
             className="absolute inset-0 bg-black/55"
             aria-label="Close menu"
           />
-          <aside className="absolute left-0 top-0 h-full w-[84%] max-w-[360px] border-r border-white/14 bg-[#070c15]/98 p-4 shadow-[0_24px_60px_rgba(0,0,0,0.55)] backdrop-blur-xl">
+          <aside className="absolute left-0 top-0 h-full w-[84%] max-w-[420px] border-r border-white/14 bg-[#070c15]/98 p-4 shadow-[0_24px_60px_rgba(0,0,0,0.55)] backdrop-blur-xl md:max-w-[520px]">
             <div className="mb-3 flex items-center justify-between">
               <p className="text-lg font-semibold text-slate-100">Threads</p>
               <button
@@ -698,7 +698,7 @@ export default function ThreadDetailPage() {
             className="absolute inset-0 bg-black/55"
             aria-label="Close access panel"
           />
-          <aside className="absolute right-0 top-0 h-full w-[88%] max-w-[380px] border-l border-white/14 bg-[#0a111b]/98 p-4 shadow-[0_24px_60px_rgba(0,0,0,0.55)] backdrop-blur-xl">
+          <aside className="absolute right-0 top-0 h-full w-[88%] max-w-[420px] border-l border-white/14 bg-[#0a111b]/98 p-4 shadow-[0_24px_60px_rgba(0,0,0,0.55)] backdrop-blur-xl md:max-w-[560px]">
             <div className="mb-3 flex items-center justify-between">
               <div>
                 <p className="text-lg font-semibold text-slate-100">Agent Access</p>

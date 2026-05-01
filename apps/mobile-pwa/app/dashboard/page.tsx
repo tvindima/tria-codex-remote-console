@@ -64,7 +64,7 @@ export default function DashboardPage() {
     >
       <Toast open={showToast} message="Stop request sent to all running threads." tone="danger" />
       <ScreenTransition>
-        <div className="grid grid-cols-2 gap-2.5">
+        <div className="grid grid-cols-2 gap-2.5 md:grid-cols-4">
           <MetricCard label="Active Mac" value={1} icon={<Activity className="h-4 w-4" />} />
           <MetricCard label="Active Threads" value={threads.filter((thread) => thread.state === "running").length} />
           <MetricCard
@@ -76,7 +76,7 @@ export default function DashboardPage() {
 
         <VistaCard>
           <h2 className="text-lg font-semibold text-slate-50">Operational Queue</h2>
-          <div className="mt-3 space-y-2.5">
+          <div className="mt-3 grid gap-2.5 md:grid-cols-2">
             {threads.slice(0, 3).map((thread) => (
               <button
                 key={thread.id}
@@ -101,7 +101,7 @@ export default function DashboardPage() {
 
         <VistaCard>
           <h2 className="text-lg font-semibold text-slate-50">Quick Actions</h2>
-          <div className="mt-3 grid grid-cols-2 gap-2">
+          <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
             <ActionButton tone="primary">
               <span className="inline-flex items-center gap-2">
                 <MessageSquarePlus className="h-4 w-4" /> New instruction

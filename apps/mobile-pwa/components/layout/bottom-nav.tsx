@@ -48,7 +48,7 @@ export function BottomNav() {
   }, []);
 
   return (
-    <nav className="mobile-safe absolute inset-x-2 bottom-2 z-40 rounded-[26px] border border-white/14 bg-white/10 px-2 py-2 backdrop-blur-xl shadow-[0_20px_60px_rgba(0,0,0,0.4)]">
+    <nav className="mobile-safe absolute bottom-2 left-1/2 z-40 w-[calc(100%-1rem)] max-w-[1080px] -translate-x-1/2 rounded-[26px] border border-white/14 bg-white/10 px-2 py-2 backdrop-blur-xl shadow-[0_20px_60px_rgba(0,0,0,0.4)] md:w-[calc(100%-2rem)]">
       <ul className="flex items-center justify-between gap-1">
         {navItems.map(({ label, href, icon: Icon, badge }) => {
           const active = isActive(pathname, href);
@@ -59,7 +59,7 @@ export function BottomNav() {
               <Link
                 href={href}
                 className={cn(
-                  "flex min-h-11 flex-col items-center justify-center rounded-2xl border border-transparent text-[11px] font-semibold transition",
+                  "flex min-h-11 flex-col items-center justify-center rounded-2xl border border-transparent px-1 text-[11px] font-semibold transition md:min-h-[46px] md:text-xs",
                   active
                     ? "bg-blue-500/18 text-blue-300 border-blue-400/40"
                     : "text-slate-400 hover:text-slate-200",

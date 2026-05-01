@@ -29,6 +29,10 @@ export default function ThreadsPage() {
       return threads;
     }
 
+    if (activeFilter === "approval") {
+      return threads.filter((thread) => thread.state === "approval" || thread.state === "waiting_approval");
+    }
+
     return threads.filter((thread) => thread.state === activeFilter);
   }, [activeFilter, threads]);
 
@@ -57,10 +61,14 @@ export default function ThreadsPage() {
           })}
         </div>
 
-        <div className="space-y-3">
-          {filteredThreads.map((thread) => (
-            <ThreadCard key={thread.id} thread={thread} />
-          ))}
+        <div className="grid gap-3 md:grid-cols-2">
+          {filteredThreads.length ? (
+            filteredThreads.map((thread) => <ThreadCard key={thread.id} thread={thread} />)
+          ) : (
+            <div className="rounded-2xl border border-white/12 bg-white/6 p-4 text-sm text-slate-300">
+              No threads available for this state.
+            </div>
+          )}
         </div>
       </ScreenTransition>
     </AppShell>
